@@ -15,7 +15,10 @@
 # ==============================================================================
 
 """
-TAE Technologies Field-Reversed Configuration (FRC) core model.
+Beam-driven FRC plasma core aligned with TAE Technologies' approach (menu: TAE FRC).
+
+Models confinement + NBI sustainment + p-11B + ICC in a 2D slice — not a full
+Norm device layout or commercial power plant.
 
 2D XY slice through a cylindrical confinement chamber. ``x`` is the machine
 axis (axial), ``y`` is the radial-like coordinate across the field-reversal

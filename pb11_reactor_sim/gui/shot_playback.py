@@ -74,6 +74,10 @@ class ShotAudioPlayer(QtCore.QObject):
     def replay(self) -> None:
         self.play()
 
+    def pause(self) -> None:
+        """Pause without resetting position (end of core speech, frames continue)."""
+        self._player.pause()
+
     def stop(self) -> None:
         """Stop playback but keep the loaded WAV for segment seeks."""
         self._segment_end_ms = None

@@ -63,7 +63,7 @@ class ReactorCanvas(QtWidgets.QWidget):
         layout.addWidget(self._glw)
 
         self._playback_label = QtWidgets.QLabel(self._glw)
-        self._playback_label.setScaledContents(True)
+        self._playback_label.setScaledContents(False)
         self._playback_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._playback_label.hide()
 
@@ -373,10 +373,18 @@ class ReactorCanvas(QtWidgets.QWidget):
         pix = QtGui.QPixmap()
         if not pix.loadFromData(png):
             return
-        self._playback_label.setPixmap(pix)
+        scaled = pix.scaled(
+            self._glw.size(),
+            QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
+        )
+        self._playback_label.setPixmap(scaled)
         self._playback_label.resize(self._glw.size())
         self._playback_label.raise_()
         self._playback_label.show()
+
+    def is_playback_visible(self) -> bool:
+        return self._playback_label.isVisible()
 
     def end_playback(self) -> None:
         self._playback_label.hide()

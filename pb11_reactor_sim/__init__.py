@@ -21,7 +21,7 @@ pb11_reactor_sim
 Interactive 2D core-slice simulator and visualizer for three distinct
 proton-boron-11 (p-11B) reactor concepts:
 
-* ``TAEReactor``  -- TAE Technologies Field-Reversed Configuration (FRC).
+* ``TAEReactor``  -- beam-driven FRC plasma core (TAE Technologies' approach).
 * ``HB11Reactor`` -- HB11 Energy laser-driven block-ignition target chamber.
 * ``LPPReactor``  -- LPPFusion Dense Plasma Focus (DPF).
 

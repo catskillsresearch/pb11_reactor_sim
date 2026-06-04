@@ -192,14 +192,19 @@ def build_playback_timeline(
     reactor_name: str,
     fps: float = FPS,
     sample_rate: int = SAMPLE_RATE,
+    with_subtitles: bool = True,
 ) -> ExportTimeline:
-    """Stretch canvas + diagnostics in lockstep; mix narration (no subtitles)."""
+    """Stretch canvas + diagnostics in lockstep; mix narration (+ subtitles for GUI)."""
     plans, duration_s = _phase_stretch_plan(
         meta, reactor_name=reactor_name, fps=fps, sample_rate=sample_rate
     )
     segments = [p[4] for p in plans if p[4] is not None]
-    out_canvas, out_meta = stretch_clips_with_plan(canvas_frames, meta, plans)
-    out_diag, _ = stretch_clips_with_plan(diag_frames, meta, plans)
+    out_canvas, out_meta = stretch_clips_with_plan(
+        canvas_frames, meta, plans, with_subtitles=with_subtitles
+    )
+    out_diag, _ = stretch_clips_with_plan(
+        diag_frames, meta, plans, with_subtitles=with_subtitles
+    )
     narr, voice_mask = _assemble_narration(segments, duration_s, sample_rate)
     return ExportTimeline(
         frames=out_canvas,

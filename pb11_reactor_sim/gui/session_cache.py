@@ -20,8 +20,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import pickle
 import re
+import shutil
 from pathlib import Path
 
 from pb11_reactor_sim.engine.optimizer import OptimizeResult
@@ -32,9 +34,76 @@ logger = logging.getLogger(__name__)
 _OPTIMIZE: dict[str, OptimizeResult] = {}
 _COMPILE: dict[str, CompiledPlayback] = {}
 
-_CACHE_ROOT = Path.home() / ".cache" / "pb11_reactor_sim"
+# Bump when compile capture / playback layout changes (invalidates disk pickles).
+COMPILE_CACHE_VERSION = 3
+
+# Legacy location (pre-unified cache); still read if present.
+_LEGACY_CACHE_ROOT = Path.home() / ".cache" / "pb11_reactor_sim"
+
+
+def _repo_root() -> Path:
+    here = Path(__file__).resolve()
+    for parent in [here, *here.parents]:
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    return here.parents[2]
+
+
+def cache_root() -> Path:
+    """Base cache dir: ``<repo>/.cache`` (same tree as narration), overridable."""
+    override = os.environ.get("PB11_SESSION_CACHE", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _repo_root() / ".cache"
+
+
+_CACHE_ROOT = cache_root()
 _OPTIMIZE_DIR = _CACHE_ROOT / "optimize"
 _COMPILE_DIR = _CACHE_ROOT / "compile"
+
+
+def compile_cache_dir() -> Path:
+    """Directory for compiled-shot ``.pkl`` files (next to ``.cache/narration``)."""
+    return _COMPILE_DIR
+
+
+def optimize_cache_dir() -> Path:
+    """Directory for per-reactor optimize JSON (next to ``.cache/narration``)."""
+    return _OPTIMIZE_DIR
+
+
+_LEGACY_OPTIMIZE_DIR = _LEGACY_CACHE_ROOT / "optimize"
+_LEGACY_COMPILE_DIR = _LEGACY_CACHE_ROOT / "compile"
+
+
+def ensure_session_cache_dirs() -> None:
+    _OPTIMIZE_DIR.mkdir(parents=True, exist_ok=True)
+    _COMPILE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def migrate_legacy_session_cache() -> int:
+    """Copy ``~/.cache/pb11_reactor_sim/{compile,optimize}`` into repo ``.cache/`` if missing."""
+    ensure_session_cache_dirs()
+    moved = 0
+    for src_dir, dest_dir in (
+        (_LEGACY_OPTIMIZE_DIR, _OPTIMIZE_DIR),
+        (_LEGACY_COMPILE_DIR, _COMPILE_DIR),
+    ):
+        if not src_dir.is_dir():
+            continue
+        for src in src_dir.iterdir():
+            if not src.is_file():
+                continue
+            dest = dest_dir / src.name
+            if dest.exists():
+                continue
+            try:
+                shutil.copy2(src, dest)
+                moved += 1
+                logger.info("Migrated session cache %s -> %s", src, dest)
+            except OSError as exc:
+                logger.warning("Could not migrate %s -> %s: %s", src, dest, exc)
+    return moved
 
 
 def controls_fingerprint(
@@ -47,6 +116,7 @@ def controls_fingerprint(
     payload = {
         "reactor": reactor_name,
         "from_quiescent": from_quiescent,
+        "compile_format": COMPILE_CACHE_VERSION,
         "controls": {k: round(float(v), 6) for k, v in sorted(controls.items())},
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -67,9 +137,14 @@ def _slug(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_") or "reactor"
 
 
+def _optimize_paths(reactor_name: str) -> list[Path]:
+    name = f"{_slug(reactor_name)}.json"
+    return [_OPTIMIZE_DIR / name, _LEGACY_OPTIMIZE_DIR / name]
+
+
 def _load_optimize_disk(reactor_name: str) -> OptimizeResult | None:
-    path = _OPTIMIZE_DIR / f"{_slug(reactor_name)}.json"
-    if not path.is_file():
+    path = next((p for p in _optimize_paths(reactor_name) if p.is_file()), None)
+    if path is None:
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -112,9 +187,14 @@ def put_optimize(reactor_name: str, result: OptimizeResult) -> None:
     _save_optimize_disk(reactor_name, result)
 
 
+def _compile_paths(fingerprint: str) -> list[Path]:
+    name = f"{fingerprint}.pkl"
+    return [_COMPILE_DIR / name, _LEGACY_COMPILE_DIR / name]
+
+
 def _load_compile_disk(fingerprint: str) -> CompiledPlayback | None:
-    path = _COMPILE_DIR / f"{fingerprint}.pkl"
-    if not path.is_file():
+    path = next((p for p in _compile_paths(fingerprint) if p.is_file()), None)
+    if path is None:
         return None
     try:
         with path.open("rb") as fh:

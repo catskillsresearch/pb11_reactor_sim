@@ -30,15 +30,15 @@ left in this order (top to bottom):
 
 **Skip to …** (when visible): jumps a *live* sim countdown to flat-top (TAE), laser pulse (HB11), or pinch (LPP). Not used during compiled playback.
 
-### Can you Fire more than once per Arm?
+### Repeat shots (TAE vs HB11 / LPP)
 
-| Reactor | Re-Arm required? | Practice |
-|---------|------------------|----------|
-| **TAE FRC** | **No** | After quiescence you may **Fire again** on the same arm (shortened re-heat sequence). Mimics repeated discharges in one experimental day without full vacuum break. |
-| **HB11 Laser** | **Yes** | Each shot consumes the target block; **Arm** loads a fresh target and re-conditions the chamber. |
-| **LPP DPF** | **Yes** | The capacitor bank is depleted after a shot; **Arm** recharges the bank and refills gas. |
+| Reactor | Full re-arm for next shot? | Practice |
+|---------|---------------------------|----------|
+| **TAE FRC** | **No** (live model) | After quiescence, re-**Compile** from quiescent for a shortened countdown; mimics repeated experimental shots in one vacuum day. |
+| **HB11 Laser** | **Yes** | Each shot consumes the target; re-condition chamber and re-**Compile**. |
+| **LPP DPF** | **Yes** | Bank depleted; recharge/refill and re-**Compile**. |
 
-After a compiled **Fire**, the view returns to live **quiescent** physics. **Fire** again on TAE without re-**Arm** (shortened sequence in the next compile). On HB11/LPP, **Arm** again before the next shot. Re-**Compile** if you changed sliders since the last compile.
+Re-**Compile** whenever sliders change so cached playback matches your controls.
 
 The **Status** line in Live Readout is the operator callout (e.g. `T−1: NBI on`, `PINCH — focus on axis`). Countdown labels like **T−5 s** are control-room shorthand, not wall-clock seconds — pre-discharge sim time is compressed so you reach the discharge in a few seconds of real time, not a minute.
 
@@ -201,9 +201,85 @@ Readout box (described per reactor below).
 
 ---
 
-## 1. TAE FRC -- Field-Reversed Configuration
+## 1. TAE FRC — beam-driven Field-Reversed Configuration
 
 ![TAE FRC](docs/tae_frc.png)
+
+The label **TAE FRC** in the reactor menu names one **physics module**, not a
+complete fusion power plant. It models the **plasma-core mechanism** that
+[TAE Technologies](https://tae.com) is developing: a **field-reversed configuration
+(FRC)** in a linear vessel, sustained primarily by **neutral beam injection (NBI)**,
+with **hydrogen–boron (p–¹¹B)** as the intended fuel. The other menu entries (HB11
+Laser, LPP DPF) are different reactor concepts; only this one follows TAE’s FRC
+program.
+
+**What this is faithful to**
+
+| Included (aligned with TAE’s public FRC story) | Omitted or folded into scalars |
+|------------------------------------------------|--------------------------------|
+| Self-organized FRC topology; `B_z` reverses on the midplane | End **formation** sections, divertor tanks, vacuum plumbing |
+| **NBI-only sustainment** as the hold mechanism (Norm milestone, 2025) | Exact Norm / Norman CAD layout and beam count |
+| **p** via tangential NBI; **¹¹B** fueled separately in the core | Powder dropper hardware, guide tubes, cooling details |
+| **ICC** concept: alphas on open field lines → segmented collectors | Full **steam + direct-conversion** power train, grid export |
+| Shot script: arm → gas fill → ramp → formation → NBI → flat-top → quiescent | Commercial **Da Vinci**-class plant accounting |
+
+So: call it **TAE’s beam-driven FRC plasma core** (menu: **TAE FRC**). It is
+**current-technology direction** from a real company, not a generic toy FRC and not
+a full “TAE reactor” in one box.
+
+### Where this sits in TAE’s program
+
+TAE’s approach is an FRC — a compact, linear alternative to a tokamak — in which
+the plasma forms a rotating structure whose internal field **reverses** relative to
+the applied field (often described as a “smoke ring”). The company’s near-term fuel
+target is **p–¹¹B** (aneutronic; ash is alphas).
+
+Public milestones relevant to *this* simulator:
+
+- **Norm** (2025): reported **NBI-only** formation, heating, and sustainment of an
+  FRC without the older end **collision / formation** sections — a step TAE describes
+  as simplifying the machine and cost path toward commercial plants
+  ([*Nature Communications*, April 2025](https://doi.org/10.1038/s41467-025-58849-5)).
+- **Earlier machines (e.g. Norman)**: used more elaborate end formation; still
+  beam-driven FRC physics, but not the same simplified layout Norm advertises.
+- **Later plants (Copernicus, Da Vinci — names from TAE’s roadmap)**: aim at net
+  energy and grid power with **thermal** wall recovery plus **direct alpha**
+  conversion at the ends. Those plants are **not** simulated here.
+
+**Norm is a physics experiment**, not an electrical generator. TAE has **not**
+reported wall-plug `Q ≥ 1` on Norm. This GUI adds a **proposed** p–¹¹B operating
+point where modeled **`Q_sys` can exceed 1** when you **Optimize** — that explores
+fuel and recovery physics, not measured Norm performance.
+
+### Two fuel paths (why only protons use the beam lines)
+
+p–¹¹B needs **both** hydrogen and boron-11, but TAE’s engineering separates the
+injection paths (boron is far heavier than hydrogen and is not practical through the
+same NBI accelerators):
+
+| Species | In TAE’s FRC approach | In this simulator |
+|---------|----------------------|-----------------|
+| **Protons (`p`)** | **Neutral beam injection** from the machine flanks: accelerate ions, neutralize so the beam crosses external fields, inject **tangentially**, re-ionize in the hot core; beams supply **heat, rotation, and current drive** to sustain the FRC. | Red macroparticles from **−x**; **`nbi_heat` / flat-top** enable injection; **NBI Current** sets beam energy and rate. |
+| **Boron (`¹¹B`)** | Introduced into the **core** (gas/powder injection separate from NBI), where it ionizes in the hot plasma. | Green macroparticles in the core; **`gas_fill`** (“fuel inventory rising”) represents **inventory build-up**, not a modeled dropper geometry. |
+
+In the view: **red from the left = NBI protons**; **green in the midplane = boron
+population**; fusion is modeled where they overlap in the FRC core.
+
+### Power plant vs this panel
+
+A full TAE commercial design is described as harvesting energy two ways: **thermal**
+conversion from radiation on the walls (steam plant) and **direct conversion** of
+fast alphas leaving along open field lines (**inverse cyclotron converter**, ICC).
+**This module keeps only the ICC thread** in the 2D slice:
+
+- Yellow alphas drift **+x** to **segmented collectors** on the right boundary.
+- **ICC Coupling** is **`η_ICC`**: fraction of **`P_fusion`** booked as electricity in
+  the 0D balance.
+- Wall X-rays and steam turbines are **not** animated; bremsstrahlung appears in
+  **`P_Brems`**, not a second turbine loop.
+
+That keeps the teaching focus on **beam sustainment + p–¹¹B + ICC** — one faithful
+slice of TAE’s FRC technology, not the whole plant.
 
 ### Physical architecture being modeled
 
@@ -478,6 +554,11 @@ Red / green / blue macroparticles **gyrate** in **`B_z`** (Boris pusher), concen
 near the midplane. NBI continuously adds **fast red protons** from the left. Yellow
 alphas are born near the core and drift **+x**; many are collected at the ICC segments.
 
+**Compile** captures **multiple simulation frames per phase** (not one still image),
+then stretches them to match narration timing — so each **Step** segment should show
+**particle motion** within that callout after a fresh **Compile**. If motion looks
+frozen, re-**Compile** (old disk cache may still hold single-frame runs).
+
 ### Machine-specific readout (Live Readout extras)
 
 | Field | Meaning |
@@ -506,52 +587,45 @@ export). Reactor bed is **2× louder**, ducked during voice. Set
 
 **Recommended button sequence** (presentation / MP4):
 
-1. **Optimize** (optional)
-2. **Compile** (wait for "Compiled N frames…" in the status bar)
+1. **Optimize** (optional; cached on disk after first run)
+2. **Compile** (wait for “Compiled…” or “Restored cached compile…” in the status bar)
 3. **Rec Start**
-4. **Arm** (arming callout from the compiled track)
-5. **Fire** (full synced shot; frames append while recording)
-6. **Rec Save** → choose path
+4. **Play** or **Step** through numbered segments (arming → countdown → flat-top → quiescent)
+5. **Rec Save** → choose path (progress dialog during encode/mux)
 
-Start **Rec Start** before **Arm** so the MP4 includes the arming segment. If you
-only need to watch (no file), skip **Rec Start** / **Rec Save** and use **Compile**
-→ **Arm** → **Fire** only.
+Start **Rec Start** before **Play** so the MP4 includes the full arming segment. If you
+only need to review (no file), skip **Rec Start** / **Rec Save** and use **Compile**
+→ **Step** through each `seq/total` callout.
 
-### Operational sequence (Arm → Fire → quiesce)
+### Operational sequence (compiled shot segments)
 
-**Arm (pre-shot)**  
-Vacuum vessel, neutral gas puff, coils at standby (`b_scale ≈ 0.12`, weak **`B_z`**).
-Cold gas macroparticles visible; diagnostics cleared.
+Each numbered step in **Play** / **Step** is one narration segment (see status bar
+`1/N … N/N`). The table below is the **TAE FRC** script order.
 
-**Fire countdown** (automatic; pre-discharge phases fast-forward in the GUI)
+| Phase | Sim duration (typical) | What happens |
+|-------|------------------------|--------------|
+| Armed | (held on screen) | Vacuum pumped, gas puffed, coils at standby; weak **`B_z`**. |
+| Gas fill | 0.8 µs | Fuel inventory rises (boron + hydrogen inventory before main heating). |
+| Coil ramp | 2.0 µs | **`b_scale → 1`**, **`B_z`** rises. |
+| FRC formation | 3.0 µs | Hot plasma macroparticles seeded; FRC topology appears. |
+| NBI on | 4.0 µs | **`nbi_scale → 1`**, tangential beam injection begins. |
+| **Flat-top** | 25 µs | Full discharge; fusion, alphas to ICC, diagnostics live. |
+| Ramp-down | 4 µs | Beams and field fall. |
+| Quiescent | (held) | Plasma quiescing; shot complete. |
 
-| Phase | Sim duration | What happens |
-|-------|--------------|--------------|
-| Gas fill | 0.8 µs | Fuel inventory rises |
-| Coil ramp | 2.0 µs | **`b_scale → 1`**, **`B_z`** rises |
-| FRC formation | 3.0 µs | Hot plasma macroparticles seeded |
-| NBI on | 4.0 µs | **`nbi_scale → 1`**, beam injection begins |
-| **Flat-top** | 25 µs | Full discharge; fusion, ICC alphas, diagnostics |
-| Ramp-down | 4 µs | Beams and field fall |
+After **quiescent**, a **new Compile** from quiescent uses TAE’s shortened **re-fire**
+phase list (no full gas-fill/arming preamble). TAE is the only reactor in this app
+that allows that without a fresh arm cycle in the live model.
 
-**Quiescent (post-shot)**  
-Plasma cools and particles drain. **Fire again without re-Arm** (shortened re-ramp).
-TAE is the only reactor that allows repeat **Fire** from quiescence without a fresh **Arm**.
-
-**Typical cadence:** *Optimize → Compile → Rec Start → Arm → Fire → Rec Save* — then *Fire* again from quiescent (TAE) or *Arm → Compile → …* (HB11/LPP).
+**Typical cadence:** *Optimize → Compile → Rec Start → Play or Step review → Rec Save*.
+Re-**Compile** only if sliders change or you need a quiescent-entry compile.
 
 ### Real-world status vs this model
 
-As of **2025**, TAE has demonstrated **NBI-only FRC formation and sustainment** on
-**Norm** ([Nature Communications, April 2025](https://doi.org/10.1038/s41467-025-58849-5)),
-but has **not** reported **`Q ≥ 1`**. **Copernicus** is targeted toward net-energy
-demonstration later this decade.
-
-This simulator implements TAE's **proposed** aneutronic pathway — beam-target fusion,
-cold electrons, ICC direct conversion — so **`Q_sys > 1`** is **achievable in the model**
-when you press **Optimize** (typically high **`B0`**, strong **`η_ICC`**, and
-**NBI ~ 60–90 A** for a Norm-like operating point). That is a **design exploration**,
-not a claim about current hardware.
+The public **Norm** result is **NBI sustainment of an FRC**; this app layers a
+**p–¹¹B performance model** (beam-target fusion, **`η_ICC`**, **`Q_sys`**) on that
+same confinement approach. See **Where this sits in TAE’s program** above for how
+that differs from a future grid-power plant.
 
 ---
 
@@ -678,8 +752,7 @@ Bank empty. **Arm again** (recharge + refill) before the next Fire.
 
 ## Suggested first experiments
 
-1. **TAE FRC:** **Optimize** → **Compile** → **Arm** → **Fire**; after quiescence,
-   **Compile** again if you moved sliders, then **Fire** without re-**Arm**. Try **NBI Current** ~100 A with a fresh compile.
+1. **TAE FRC:** Read **§1** (beam-driven FRC plasma core), then **Optimize** → **Compile** → **Step** through `1/N…N/N`. After quiescence, re-**Compile** for the shortened re-fire path. Try **NBI Current** ~60–90 A with a fresh compile.
    Watch `T_i` climb on the top plot and red beam ions stream in from the left.
    Then raise **B0** and note the tighter gyro-orbits and improved confinement.
 

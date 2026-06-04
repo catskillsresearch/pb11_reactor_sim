@@ -17,9 +17,9 @@
 """
 Precompute a full Arm → Fire → quiescent shot for synced GUI playback.
 
-One representative snapshot per phase (end of that phase in physics), then the
-same narration-first stretch + audio mix as MP4 export. Voice clips come from
-the warmed disk cache only (no per-frame capture during fast-forward).
+Several physics snapshots per phase (particle motion), then narration-first
+stretch + audio mix (same recipe as MP4 export). Voice clips come from the
+warmed disk cache only (no synthesis during fast-forward capture).
 """
 from __future__ import annotations
 
@@ -64,8 +64,9 @@ class CompiledPlayback:
     timeline_segments: tuple[TimelineSegment, ...] = ()
 
 
-# Grab several physics frames per phase so stretched playback shows motion.
-_CAPTURE_GRABS_PER_PHASE = 8
+# Snapshots per phase before stretch; more clips → visible macroparticle motion.
+_CAPTURE_GRABS_PER_PHASE = 20
+_MAX_SNAPS_PER_PHASE = 28
 
 
 def _phase_index_bounds(meta: list[FrameMeta], phase: str) -> tuple[int, int]:
@@ -136,7 +137,7 @@ def _capture_phase_clips(
         if snap is None:
             return
         clips = phase_clips[phase_key]
-        if clips and clips[-1][0] == snap[0]:
+        if len(clips) >= _MAX_SNAPS_PER_PHASE:
             return
         clips.append(snap)
 
@@ -161,7 +162,9 @@ def _capture_phase_clips(
     tick_ui()
 
     if not from_quiescent:
-        grab("armed")
+        for _ in range(6):
+            grab("armed")
+            tick_ui()
 
     if not reactor.fire_shot():
         raise RuntimeError("fire_shot failed after arm")
@@ -188,7 +191,10 @@ def _capture_phase_clips(
             prev_key = key
 
         ticks_in_phase += 1
-        interval = max(1, _CAPTURE_GRABS_PER_PHASE // 2)
+        if reactor.shot_phase == ShotPhase.FIRING:
+            interval = 1
+        else:
+            interval = max(1, _CAPTURE_GRABS_PER_PHASE // 6)
         if ticks_in_phase == 1 or ticks_in_phase % interval == 0:
             grab(key)
 

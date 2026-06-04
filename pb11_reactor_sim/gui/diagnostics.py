@@ -120,7 +120,7 @@ class DiagnosticsPanel(QtWidgets.QWidget):
     def show_playback_png(self, png: bytes | None) -> None:
         if not hasattr(self, "_playback_label"):
             self._playback_label = QtWidgets.QLabel(self)
-            self._playback_label.setScaledContents(True)
+            self._playback_label.setScaledContents(False)
             self._playback_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         if not png:
             self.end_playback()
@@ -128,7 +128,12 @@ class DiagnosticsPanel(QtWidgets.QWidget):
         pix = QtGui.QPixmap()
         if not pix.loadFromData(png):
             return
-        self._playback_label.setPixmap(pix)
+        scaled = pix.scaled(
+            self.size(),
+            QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
+        )
+        self._playback_label.setPixmap(scaled)
         self._playback_label.resize(self.size())
         self._playback_label.raise_()
         self._playback_label.show()

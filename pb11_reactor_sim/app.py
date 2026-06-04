@@ -123,6 +123,7 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         self._review_seg_ix = -1
         self._review_auto = False
         self._review_segment_done = False
+        self._segment_voice_done = False
         self._playback_ix = 0
         self._playback_stop_ix = 0
         self._playback_mode: str | None = None  # "review"
@@ -199,11 +200,33 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         )
         self._sync_shot_ui()
         self._update_readout()
-        if self._apply_session_optimize(name):
-            if self._try_restore_compile_cache():
-                self.statusBar().showMessage(
-                    f"{name}: restored cached Optimize + Compile for current sliders."
-                )
+        from pb11_reactor_sim.gui.session_cache import (
+            cache_root,
+            migrate_legacy_session_cache,
+            optimize_cache_dir,
+        )
+
+        migrated = migrate_legacy_session_cache()
+        restored = self._apply_session_optimize(name)
+        if self._try_restore_compile_cache():
+            migrate_note = (
+                f" Migrated {migrated} file(s) from ~/.cache/pb11_reactor_sim."
+                if migrated
+                else ""
+            )
+            self.statusBar().showMessage(
+                f"{name}: restored cached Optimize + Compile.{migrate_note} "
+                f"Disk: {cache_root()}/optimize, {cache_root()}/compile."
+            )
+        elif restored:
+            self.statusBar().showMessage(
+                f"{name}: restored cached Optimize ({optimize_cache_dir()})."
+            )
+        elif migrated:
+            self.statusBar().showMessage(
+                f"Migrated {migrated} cache file(s) into {cache_root()} "
+                f"(compile/, optimize/)."
+            )
         self._warm_reactor_narration_async(name)
 
     def _apply_session_optimize(self, reactor_name: str) -> bool:
@@ -232,6 +255,7 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
             reactor_cls=type(self._reactor) if self._reactor else None,
         )
         self._review_seg_ix = -1
+        self._review_segment_done = True
         self._shot_player.load(compiled.mixed_audio)
         self.controls.set_review_enabled(True)
         if self._recorder.active:
@@ -240,10 +264,13 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         self.controls.unmark_steps("review")
         n_seg = len(self._review_segments)
         n = len(compiled.meta)
+        from pb11_reactor_sim.gui.session_cache import compile_cache_dir
+
         prefix = "Restored cached compile" if from_cache else "Compiled"
         self.statusBar().showMessage(
             f"{prefix}: {n} frames ({compiled.duration_s:.1f} s), "
-            f"{n_seg} numbered steps. Use Play or Step to review."
+            f"{n_seg} numbered steps. Cache: {compile_cache_dir()}. "
+            "Use Play or Step to review."
         )
 
     def _try_restore_compile_cache(self) -> bool:
@@ -398,6 +425,21 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
                 from_quiescent=from_quiescent,
             )
 
+        def _refresh_compile_view() -> None:
+            r = self._reactor
+            if r is None:
+                return
+            self.canvas.refresh()
+            self.canvas.update_hud(
+                gui_frame=r.step_index,
+                substeps=substeps_per_frame(r),
+                speed_mode=hud_speed_mode(r),
+                sim_time_us=r.time * 1.0e6,
+                ops=r.shot_phase.value,
+                idle=False,
+            )
+            self.diagnostics.update_from(r.diagnostics)
+
         try:
             compiled = compile_shot_playback(
                 self._reactor,
@@ -406,8 +448,8 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
                 grab_canvas=self.canvas.grab_frame_png,
                 grab_diag=self.diagnostics.grab_frame_png,
                 tick_ui=QtWidgets.QApplication.processEvents,
-                refresh_canvas=self.canvas.refresh,
-                refresh_diag=lambda: self.diagnostics.update_from(self._reactor.diagnostics),
+                refresh_canvas=_refresh_compile_view,
+                refresh_diag=_refresh_compile_view,
                 progress=progress,
             )
             if fp:
@@ -465,22 +507,17 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
     def _on_step(self) -> None:
         if self._reactor is None or not self._require_compiled():
             return
-        # Step while playing only stops this segment — does not skip to the next callout.
         if self._playback_mode is not None:
             self._stop_review_playback(hold_frame=True)
-            self._review_segment_done = False
+            self._review_segment_done = True
             self.statusBar().showMessage(
                 f"{self._review_segments[self._review_seg_ix].subtitle}  —  "
-                "Stopped. Press Step again to replay or finish segment first."
+                "Stopped. Press Step for the next segment."
             )
             return
-        if not self._review_segment_done:
-            if self._review_seg_ix >= 0:
-                self._frame = 0
-                self._review_auto = False
-                self._play_review_segment(self._review_seg_ix, auto_continue=False)
-                return
         next_ix = 0 if self._review_seg_ix < 0 else self._review_seg_ix + 1
+        if not self._review_segment_done:
+            next_ix = max(0, self._review_seg_ix)
         if next_ix >= len(self._review_segments):
             self.statusBar().showMessage(
                 f"Shot review complete ({self._review_segments[-1].seq}/"
@@ -539,6 +576,7 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         self._review_seg_ix = seg_ix
         self._review_auto = auto_continue
         self._review_segment_done = False
+        self._segment_voice_done = False
         seg = self._review_segments[seg_ix]
         self._playback_mode = "review"
         self._playback_ix = seg.start_ix
@@ -608,21 +646,32 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
             if 0 <= self._review_seg_ix < len(self._review_segments)
             else None
         )
-        audio_end = (
-            seg.speech_end_ms
-            if seg is not None
-            else self._shot_player.segment_end_ms()
-        )
         if (
             seg is not None
             and shot_audio_enabled()
-            and audio_end is not None
-            and self._shot_player.position_ms() >= audio_end
+            and not self._segment_voice_done
+            and seg.speech_end_ms > seg.start_ms
+            and self._shot_player.position_ms() >= seg.speech_end_ms
         ):
-            self._playback_ix = max(seg.start_ix, seg.end_ix - 1)
-            self._end_playback_segment()
-            return
-        self._playback_ix += 1
+            self._shot_player.pause()
+            self._segment_voice_done = True
+
+        if (
+            seg is not None
+            and shot_audio_enabled()
+            and not self._segment_voice_done
+            and seg.end_ms > seg.start_ms
+        ):
+            span_ix = max(1, self._playback_stop_ix - seg.start_ix)
+            pos_ms = max(0, self._shot_player.position_ms() - seg.start_ms)
+            span_ms = max(1, seg.end_ms - seg.start_ms)
+            self._playback_ix = seg.start_ix + min(
+                span_ix - 1,
+                int(pos_ms * span_ix / span_ms),
+            )
+        else:
+            self._playback_ix += 1
+
         if self._playback_ix >= self._playback_stop_ix:
             self._playback_ix = max(0, self._playback_stop_ix - 1)
             self._end_playback_segment()
@@ -718,8 +767,9 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
     def _set_run_timer(self, running: bool) -> None:
         self._playing = running
         if not running:
-            self._shot_player.stop()
             self._timer.stop()
+            if self._playback_mode is None:
+                self._shot_player.stop()
         else:
             self._timer.start()
 
@@ -865,6 +915,14 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
 
         r = self._reactor
         substeps = substeps_per_frame(r)
+
+        # Compiled review holds the last frame; do not overwrite with idle HUD.
+        if (
+            self._compiled_playback is not None
+            and self._review_seg_ix >= 0
+            and self.canvas.is_playback_visible()
+        ):
+            return
 
         # Play does not advance physics while unarmed / armed (by design).
         if r.shot_phase in (ShotPhase.UNARMED, ShotPhase.ARMED):

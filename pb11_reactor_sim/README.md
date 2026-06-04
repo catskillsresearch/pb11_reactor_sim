@@ -5,7 +5,7 @@ Interactive 2D core-slice simulator and visualizer for three proton-boron-11
 
 | Model | Concept | Controls |
 |-------|---------|----------|
-| **TAE FRC** | TAE Technologies Field-Reversed Configuration | NBI current, background `B0` |
+| **TAE FRC** | Beam-driven FRC plasma core (TAE Technologies' approach) | NBI current, background `B0` |
 | **HB11 Laser** | HB11 Energy laser-driven block ignition | Laser intensity, collector grid voltage (to 3 MV) |
 | **LPP DPF** | LPPFusion Dense Plasma Focus | Capacitor-bank voltage, gas pressure |
 
