@@ -4,28 +4,31 @@ This guide walks through the dashboard: the universal colored-particle legend,
 then a narrative for each of the three reactor concepts (physical architecture,
 control inputs, what the particles are doing, and the output measurements).
 
-> Launch with `./pb11_reactor_sim/run.sh`, pick a reactor from the dropdown,
-> press **Arm shot** to prepare a discharge (then walk away for coffee — the
-> chamber is safe in **armed** standby), then **Fire** when ready. **Fire**
-> auto-starts **Play** and runs the full countdown underneath, fast-forwarding
-> through gas fill / coil ramp / T−3…2…1 until flat-top, pulse, or pinch at
-> normal speed. Use **Skip to flat-top** (or pulse / pinch) if you want to
-> jump straight to the show. **Reset** returns to unarmed idle.
+> Launch with `./pb11_reactor_sim/run.sh`, pick a reactor, set sliders (or
+> **Optimize**), then **Compile** to pre-render the full shot (video + voice in
+> sync). **Rec Start** → **Play** or **Step** (numbered callouts `1/N` … `N/N`,
+> one segment at a time; **Back** revisits the previous step) → **Rec Save** for
+> MP4. Re-compile after you change sliders or reactor. **Skip to flat-top**
+> (or pulse / pinch) applies only to a live sim countdown, not compiled review.
 
 ---
 
-## Arm / Fire operations (all reactors)
+## Simulation buttons (all reactors)
 
-The simulator no longer starts mid-discharge. At launch the chamber is **unarmed**
-(empty or cold). A real control-room sequence is approximated:
+The chamber starts **unarmed** at launch. Use the **Simulation** column on the
+left in this order (top to bottom):
 
 | Button | What it does |
 |--------|----------------|
-| **Arm shot** | Pre-shot prep: pump-down, gas fill, bank charge, target load, coils standby. Clears the diagnostic plots and sets **Ops = armed**. Safe standby — nothing discharges until **Fire**. |
-| **Fire** | Runs the scripted countdown (status bar + Live Readout), **fast-forwarding** pre-discharge phases, then flat-top / pinch / laser pulse at normal speed. **Play** starts automatically until quiescence. |
-| **Skip to …** | Visible during the countdown only. Jumps straight to flat-top (TAE), laser pulse (HB11), or pinch (LPP) with fields and particles already hot. |
-| **Play / Pause** | Advance time manually while **armed** or **quiescent** (watch cooldown between shots). |
-| **Reset** | Factory idle: default sliders, **unarmed**, empty chamber. |
+| **Optimize** | Search that reactor's sliders for best steady-state `Q_net` (background thread). Sliders move to the optimum; status bar reports the result. |
+| **Compile** | Run the full shot once in the background: one snapshot per phase, narration-first stretch, facility bed + cached ChatTTS — same recipe as MP4 export. Required before **Play** / **Step** / **Back**. Invalidated if you change reactor or sliders. |
+| **Play** | Play the full compiled shot from step **1/N** (Arm) through **N/N** (quiescent), segment after segment. |
+| **Step** | Play one numbered segment per press (Arm first, then each fire phase, then quiescent). |
+| **Back** | Jump to the previous segment and pause on its first frame. |
+| **Rec Start** | Begin capturing frames (canvas + three diagnostic plots). Disabled while a capture is active. |
+| **Rec Save** | Stop capture and save MP4 (numbered subtitles + synced audio on export). Enabled after **Rec Start**. |
+
+**Skip to …** (when visible): jumps a *live* sim countdown to flat-top (TAE), laser pulse (HB11), or pinch (LPP). Not used during compiled playback.
 
 ### Can you Fire more than once per Arm?
 
@@ -35,7 +38,7 @@ The simulator no longer starts mid-discharge. At launch the chamber is **unarmed
 | **HB11 Laser** | **Yes** | Each shot consumes the target block; **Arm** loads a fresh target and re-conditions the chamber. |
 | **LPP DPF** | **Yes** | The capacitor bank is depleted after a shot; **Arm** recharges the bank and refills gas. |
 
-Between shots, leave **Play** on during **quiescent** to watch temperatures fall, particles drain, and fields relax before the next **Fire** (or **Arm** on HB11/LPP).
+After a compiled **Fire**, the view returns to live **quiescent** physics. **Fire** again on TAE without re-**Arm** (shortened sequence in the next compile). On HB11/LPP, **Arm** again before the next shot. Re-**Compile** if you changed sliders since the last compile.
 
 The **Status** line in Live Readout is the operator callout (e.g. `T−1: NBI on`, `PINCH — focus on axis`). Countdown labels like **T−5 s** are control-room shorthand, not wall-clock seconds — pre-discharge sim time is compressed so you reach the discharge in a few seconds of real time, not a minute.
 
@@ -304,7 +307,7 @@ f_{\mathrm{beam}} = \min\!\left(0.72,\ 0.10 + 0.62\,\frac{I_{\mathrm{NBI}}}{120}
 
 ### Power balance and gain (TAE-specific)
 
-The **`Q_net`** plot and **Solve for optimal Q_net** use **system gain** for TAE:
+The **`Q_net`** plot and **Optimize** use **system gain** for TAE:
 
 \[
 \boxed{
@@ -494,22 +497,25 @@ the long flat-top hold, **`[FF×4 …]`** during ramp-down, then **`[1× …]`**
 1× segments. Use it to see when the GUI is compressing sim time vs running in real time.
 advancing 35× more simulation time per tick.
 
-**Record MP4** (control panel): captures the **spatial canvas plus the three
+**Rec Start** / **Rec Save**: captures the **spatial canvas plus the three
 right-hand graphs** (temperature, power balance, Q). Control panel is excluded.
-On save, export runs **narration-first**: ChatTTS callouts are synthesized, then each
-phase is **held** for at least ``speech + 1.5 s`` so nothing is cut off. White
-**subtitles** show the callout text. Reactor bed audio is **2× louder**, ducked to
-the prior level during voice. Set ``PB11_SKIP_NARRATION=1`` for bed-only export.
-Requires **ffmpeg** on PATH.
-Recommended workflow (keeps optimized sliders — no Reset needed):
+The saved MP4 uses the same **narration-first** mix as **Compile** (cached
+ChatTTS, each phase held for at least ``speech + 1.5 s``, white **subtitles** on
+export). Reactor bed is **2× louder**, ducked during voice. Set
+``PB11_SKIP_NARRATION=1`` for bed-only export. Requires **ffmpeg** on PATH.
 
-1. **Solve for optimal Q_net**
-2. **Record ON**
-3. **Arm shot**
-4. **Fire** (Play starts automatically; recording captures from here)
-5. **Record OFF** → save dialog
+**Recommended button sequence** (presentation / MP4):
 
-Toggle recording before Fire is fine — pre-Fire idle frames are **not** captured, and the buffer **clears at Fire** so the MP4 is just the discharge. **Reset** restores factory slider defaults; skip it if you want to keep the optimized settings.
+1. **Optimize** (optional)
+2. **Compile** (wait for "Compiled N frames…" in the status bar)
+3. **Rec Start**
+4. **Arm** (arming callout from the compiled track)
+5. **Fire** (full synced shot; frames append while recording)
+6. **Rec Save** → choose path
+
+Start **Rec Start** before **Arm** so the MP4 includes the arming segment. If you
+only need to watch (no file), skip **Rec Start** / **Rec Save** and use **Compile**
+→ **Arm** → **Fire** only.
 
 ### Operational sequence (Arm → Fire → quiesce)
 
@@ -532,7 +538,7 @@ Cold gas macroparticles visible; diagnostics cleared.
 Plasma cools and particles drain. **Fire again without re-Arm** (shortened re-ramp).
 TAE is the only reactor that allows repeat **Fire** from quiescence without a fresh **Arm**.
 
-**Typical cadence:** *Standby → Arm → (coffee) → Fire → flat-top → quiesce → Fire …*
+**Typical cadence:** *Optimize → Compile → Rec Start → Arm → Fire → Rec Save* — then *Fire* again from quiescent (TAE) or *Arm → Compile → …* (HB11/LPP).
 
 ### Real-world status vs this model
 
@@ -543,7 +549,7 @@ demonstration later this decade.
 
 This simulator implements TAE's **proposed** aneutronic pathway — beam-target fusion,
 cold electrons, ICC direct conversion — so **`Q_sys > 1`** is **achievable in the model**
-when you **Solve for optimal Q_net** (typically high **`B0`**, strong **`η_ICC`**, and
+when you press **Optimize** (typically high **`B0`**, strong **`η_ICC`**, and
 **NBI ~ 60–90 A** for a Norm-like operating point). That is a **design exploration**,
 not a claim about current hardware.
 
@@ -606,7 +612,7 @@ Chamber pumped, **grid at V_grid**, fresh **fuel target** loaded (cold block on 
 **Quiescent**  
 Target is spent. **You must Arm again** before the next Fire (new target + pump-down).
 
-**Typical cadence:** *Arm → laser clear → Fire → shot → Arm (new target) → Fire …*
+**Typical cadence:** *Compile → Rec Start → Arm → Fire → Rec Save* — then **Arm** again (new target) before the next compile/shot.
 
 ---
 
@@ -666,14 +672,14 @@ Gas fill at slider **Gas Pressure**, **capacitor bank charged** (`I(t) ≈ 0`), 
 **Quiescent**  
 Bank empty. **Arm again** (recharge + refill) before the next Fire.
 
-**Typical cadence:** *Charge → Arm → 3-2-1 Fire → bang → quiesce → Arm → Fire …*
+**Typical cadence:** *Compile → Rec Start → Arm → Fire → Rec Save* — then **Arm** again (recharge) before the next shot.
 
 ---
 
 ## Suggested first experiments
 
-1. **TAE FRC:** **Arm shot** → **Fire** → watch formation then flat-top; after quiescence,
-   **Fire** again without re-Arm. Then raise **NBI Current** to ~100 A on a new Arm/Fire.
+1. **TAE FRC:** **Optimize** → **Compile** → **Arm** → **Fire**; after quiescence,
+   **Compile** again if you moved sliders, then **Fire** without re-**Arm**. Try **NBI Current** ~100 A with a fresh compile.
    Watch `T_i` climb on the top plot and red beam ions stream in from the left.
    Then raise **B0** and note the tighter gyro-orbits and improved confinement.
 
@@ -693,10 +699,10 @@ real time, exactly how hard aneutronic breakeven is and which knobs move it.
 
 ---
 
-## The "Solve for optimal Q_net" button
+## The **Optimize** button
 
-If you do not yet have intuition for what the sliders do, press **Solve for
-optimal Q_net**. The optimizer searches *that reactor's own* control space
+If you do not yet have intuition for what the sliders do, press **Optimize**.
+The optimizer searches *that reactor's own* control space
 (whatever sliders it exposes) for the combination that maximizes the
 steady-state net gain `Q`, then moves the sliders there for you and reports the
 result in the status bar.

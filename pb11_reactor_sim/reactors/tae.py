@@ -254,16 +254,19 @@ class TAEReactor(ReactorSimulation):
         x_left = g.x0 + 0.02
         x_icc = g.x0 + g.Lx - 0.04
         wall_c = (150, 210, 255)
+        nbi_c = (255, 200, 150)
         icc_c = (170, 200, 255)
         self.boundaries = [
             BoundaryShape("line", (x_left, y_top, x_icc, y_top), wall_c),
             BoundaryShape("line", (x_left, y_bot, x_icc, y_bot), wall_c),
-            BoundaryShape("line", (x_left, y_bot, x_left, y_top), wall_c),
+            BoundaryShape("line", (x_left, y_bot, x_left, y_top), nbi_c),
             BoundaryShape("line", (x_icc, y_bot, x_icc, y_top), icc_c),
         ]
         self.labels = [
             StructureLabel("Cylindrical Conducting Wall", x_left + 0.02, y_top - 0.025,
                            wall_c, angle=0.0, anchor=(0.0, 0.5)),
+            StructureLabel("Neutral Beam Proton Injector", x_left + 0.018, 0.0,
+                           nbi_c, angle=90.0, anchor=(0.5, 0.5)),
             StructureLabel("ICC Segmented Collector", x_icc - 0.018, 0.0,
                            icc_c, angle=90.0, anchor=(0.5, 0.5)),
             StructureLabel("Field Reversal Plane (B_z = 0)", -0.02, 0.012,

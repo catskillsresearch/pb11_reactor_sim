@@ -36,8 +36,21 @@ from pb11_reactor_sim.gui.canvas import ReactorCanvas
 from pb11_reactor_sim.gui.controls import ControlPanel
 from pb11_reactor_sim.gui.diagnostics import DiagnosticsPanel
 from pb11_reactor_sim.gui.chattts_narration import narration_enabled
-from pb11_reactor_sim.gui.live_audio import LiveShotAudio, live_audio_enabled
 from pb11_reactor_sim.gui.recorder import FrameRecorder, compose_png_horizontal
+from pb11_reactor_sim.gui.narration_scripts import PHASE_NARRATION
+from pb11_reactor_sim.gui.shot_audio import build_recorded_shot_audio
+from pb11_reactor_sim.gui.shot_compiler import CompiledPlayback, compile_shot_playback
+from pb11_reactor_sim.gui.shot_playback import ShotAudioPlayer, shot_audio_enabled
+from pb11_reactor_sim.gui.session_cache import (
+    controls_fingerprint,
+    controls_near,
+    get_optimize,
+    lookup_compile,
+    put_compile,
+    put_optimize,
+)
+from pb11_reactor_sim.gui.shot_review import ReviewSegment, build_review_segments
+from pb11_reactor_sim.gui.sim_stepping import hud_speed_mode, is_fast_gui_frame, substeps_per_frame
 from pb11_reactor_sim.reactors import REACTOR_REGISTRY
 
 #: Physics substeps advanced per GUI frame.
@@ -104,7 +117,15 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         self._frame = 0
         self._auto_paused_after_shot = False
         self._recorder = FrameRecorder()
-        self._live_audio = LiveShotAudio(self)
+        self._shot_player = ShotAudioPlayer(self)
+        self._compiled_playback: CompiledPlayback | None = None
+        self._review_segments: list[ReviewSegment] = []
+        self._review_seg_ix = -1
+        self._review_auto = False
+        self._review_segment_done = False
+        self._playback_ix = 0
+        self._playback_stop_ix = 0
+        self._playback_mode: str | None = None  # "review"
 
         # --- widgets ---
         self.controls = ControlPanel(list(REACTOR_REGISTRY.keys()))
@@ -127,13 +148,14 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         # --- signals ---
         self.controls.reactorChanged.connect(self._on_reactor_changed)
         self.controls.controlsChanged.connect(self._on_controls_changed)
-        self.controls.playToggled.connect(self._on_play_toggled)
-        self.controls.resetRequested.connect(self._on_reset)
-        self.controls.armRequested.connect(self._on_arm)
-        self.controls.fireRequested.connect(self._on_fire)
+        self.controls.playRequested.connect(self._on_play)
+        self.controls.stepRequested.connect(self._on_step)
+        self.controls.backRequested.connect(self._on_back)
+        self.controls.compileRequested.connect(self._on_compile)
         self.controls.skipToDischargeRequested.connect(self._on_skip_to_discharge)
         self.controls.optimizeRequested.connect(self._on_optimize)
-        self.controls.recordToggled.connect(self._on_record_toggled)
+        self.controls.recordStartRequested.connect(self._on_record_start)
+        self.controls.recordSaveRequested.connect(self._on_record_save)
 
         # Optimizer worker thread handles (kept alive while running).
         self._opt_thread: QtCore.QThread | None = None
@@ -158,8 +180,8 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
 
     # -- reactor management -------------------------------------------------
     def _on_reactor_changed(self, name: str) -> None:
-        self._live_audio.stop()
-        self._live_audio.set_reactor(name)
+        self._shot_player.stop()
+        self._clear_compiled_playback()
         cls = REACTOR_REGISTRY[name]
         self.controls.rebuild_sliders(cls.control_specs())
         self._reactor = cls(field_solver=self.backend)
@@ -177,7 +199,66 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         )
         self._sync_shot_ui()
         self._update_readout()
+        if self._apply_session_optimize(name):
+            if self._try_restore_compile_cache():
+                self.statusBar().showMessage(
+                    f"{name}: restored cached Optimize + Compile for current sliders."
+                )
         self._warm_reactor_narration_async(name)
+
+    def _apply_session_optimize(self, reactor_name: str) -> bool:
+        """Restore last optimize for this reactor (memory or disk) and tick the checklist."""
+        result = get_optimize(reactor_name)
+        if result is None:
+            return False
+        self.controls.set_values(result.controls)
+        if self._reactor is not None:
+            self._reactor.apply_controls(self.controls.current_values())
+            self._update_readout()
+        if not self.controls.is_step_done("optimize"):
+            self.controls.mark_step_done("optimize")
+        return True
+
+    def _install_compiled_playback(
+        self,
+        compiled: CompiledPlayback,
+        *,
+        from_cache: bool = False,
+    ) -> None:
+        self._compiled_playback = compiled
+        self._review_segments = build_review_segments(
+            compiled,
+            self._recorder_reactor_name(),
+            reactor_cls=type(self._reactor) if self._reactor else None,
+        )
+        self._review_seg_ix = -1
+        self._shot_player.load(compiled.mixed_audio)
+        self.controls.set_review_enabled(True)
+        if self._recorder.active:
+            self._attach_recorder_compiled_audio(compiled.mixed_audio)
+        self.controls.mark_step_done("compile")
+        self.controls.unmark_steps("review")
+        n_seg = len(self._review_segments)
+        n = len(compiled.meta)
+        prefix = "Restored cached compile" if from_cache else "Compiled"
+        self.statusBar().showMessage(
+            f"{prefix}: {n} frames ({compiled.duration_s:.1f} s), "
+            f"{n_seg} numbered steps. Use Play or Step to review."
+        )
+
+    def _try_restore_compile_cache(self) -> bool:
+        if self._reactor is None:
+            return False
+        from_quiescent = self._reactor.shot_phase == ShotPhase.QUIESCENT
+        cached, _fp = lookup_compile(
+            self._recorder_reactor_name(),
+            self.controls.current_values(),
+            from_quiescent=from_quiescent,
+        )
+        if cached is None:
+            return False
+        self._install_compiled_playback(cached, from_cache=True)
+        return True
 
     def _warm_reactor_narration_async(self, reactor_name: str) -> None:
         from pb11_reactor_sim.gui.narration_cache import cache_ready_for_reactor
@@ -220,57 +301,214 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         self._narr_thread = None
         self._narr_worker = None
 
-    def _on_arm(self) -> None:
-        if self._reactor is None:
+    def _clear_compiled_playback(self) -> None:
+        self._compiled_playback = None
+        self._review_segments = []
+        self._review_seg_ix = -1
+        self._review_auto = False
+        self._review_segment_done = False
+        self._playback_mode = None
+        self._playback_ix = 0
+        self._playback_stop_ix = 0
+        self.canvas.end_playback()
+        self.diagnostics.end_playback()
+        self._shot_player.cleanup()
+        self.controls.set_review_enabled(False)
+        self.controls.unmark_steps("compile", "review")
+
+    def _require_compiled(self) -> bool:
+        if self._compiled_playback is None or not self._review_segments:
+            self.statusBar().showMessage(
+                "Compile simulation first (current sliders), then Play or Step."
+            )
+            return False
+        return True
+
+    def _stop_review_playback(self, *, hold_frame: bool = False) -> None:
+        if self._playback_mode is None:
             return
-        self._on_play_toggled(False)
-        self.controls.set_playing(False)
-        self._reactor.apply_controls(self.controls.current_values())
-        self._reactor.arm_shot()
-        self.diagnostics.clear()
-        self._frame = 0
-        self.canvas.attach(self._reactor, self.backend.label)
-        self.canvas.update_hud(
-            gui_frame=0,
-            substeps=_SUBSTEPS_PER_FRAME,
-            speed_mode="idle",
-            sim_time_us=0.0,
-            ops=self._reactor.shot_phase.value,
-            idle=True,
-        )
-        self._sync_shot_ui()
-        self._update_readout()
-        self._live_audio.set_reactor(self._recorder_reactor_name())
-        if not self._live_audio.play_phase_callout("armed"):
-            hint = " (voice cache still warming)" if narration_enabled() else ""
-            self.statusBar().showMessage(f"{self._reactor.shot_callout}{hint}")
-        else:
-            self.statusBar().showMessage(self._reactor.shot_callout)
+        self._playback_mode = None
+        self._review_auto = False
+        self._set_run_timer(False)
+        self._shot_player.stop()
+        if hold_frame:
+            return
 
     def _recorder_reactor_name(self) -> str:
         return type(self._reactor).display_name if self._reactor is not None else ""
 
-    def _on_fire(self) -> None:
-        if self._reactor is None or not self._reactor.fire_shot():
-            return
-        from pb11_reactor_sim.gui.narration_cache import cache_ready_for_reactor
+    def _attach_recorder_compiled_audio(self, mixed) -> None:
+        """Attach pre-mixed compile audio for MP4 export (tolerates stale recorder builds)."""
+        import numpy as np
 
-        name = self._recorder_reactor_name()
-        voice_note = ""
-        if narration_enabled() and not cache_ready_for_reactor(name):
-            voice_note = f"  |  Voice cache still building for {name}."
+        arr = np.asarray(mixed, dtype=np.float32).reshape(-1)
+        setter = getattr(self._recorder, "set_compiled_audio", None)
+        if callable(setter):
+            setter(arr)
+        else:
+            self._recorder._compiled_mixed = arr
+
+    def _on_compile(self) -> None:
+        if self._reactor is None:
+            return
+        ok, reason = self.controls.can_run_step("compile")
+        if not ok:
+            self.statusBar().showMessage(reason)
+            return
+        from_quiescent = self._reactor.shot_phase == ShotPhase.QUIESCENT
+        cached, fp = lookup_compile(
+            self._recorder_reactor_name(),
+            self.controls.current_values(),
+            from_quiescent=from_quiescent,
+        )
+        if cached is not None:
+            self._set_run_timer(False)
+            self._install_compiled_playback(cached, from_cache=True)
+            self._reactor.arm_shot()
+            self.canvas.attach(self._reactor, self.backend.label)
+            self._sync_shot_ui()
+            self._update_readout()
+            return
+
+        self._set_run_timer(False)
+        self.controls.unmark_steps("compile", "review")
+        self.controls.set_compiling(True)
+        dlg = QtWidgets.QProgressDialog(
+            "Compiling full shot (physics + voice + facility audio)…",
+            None,
+            0,
+            4,
+            self,
+        )
+        dlg.setWindowTitle("p-11B Reactor Simulator")
+        dlg.setMinimumDuration(0)
+        dlg.show()
+        QtWidgets.QApplication.processEvents()
+
+        def progress(done: int, total: int, label: str) -> None:
+            dlg.setMaximum(max(total, 1))
+            dlg.setValue(min(done, total))
+            dlg.setLabelText(f"({done}/{total}) {label}")
+            QtWidgets.QApplication.processEvents()
+
+        if fp is None:
+            fp = controls_fingerprint(
+                self._recorder_reactor_name(),
+                self.controls.current_values(),
+                from_quiescent=from_quiescent,
+            )
+
+        try:
+            compiled = compile_shot_playback(
+                self._reactor,
+                from_quiescent=from_quiescent,
+                reactor_name=self._recorder_reactor_name(),
+                grab_canvas=self.canvas.grab_frame_png,
+                grab_diag=self.diagnostics.grab_frame_png,
+                tick_ui=QtWidgets.QApplication.processEvents,
+                refresh_canvas=self.canvas.refresh,
+                refresh_diag=lambda: self.diagnostics.update_from(self._reactor.diagnostics),
+                progress=progress,
+            )
+            if fp:
+                put_compile(fp, compiled)
+            self._install_compiled_playback(compiled, from_cache=False)
+        except Exception as exc:  # noqa: BLE001
+            self._clear_compiled_playback()
+            self.statusBar().showMessage(f"Compile failed ({exc}).")
+        finally:
+            dlg.close()
+            self.controls.set_compiling(False)
+            self._reactor.arm_shot()
+            self.canvas.attach(self._reactor, self.backend.label)
+            self._sync_shot_ui()
+            self._update_readout()
+
+    def _compile_recorded_audio_for_mp4(self) -> None:
+        """After a recorded shot, rebuild audio from captured frames (MP4-accurate)."""
+        if not shot_audio_enabled() or not self._recorder.active or not self._recorder.has_frames():
+            return
+        dlg = QtWidgets.QProgressDialog("Compiling recorded shot audio for MP4…", None, 0, 3, self)
+        dlg.setMinimumDuration(0)
+        dlg.show()
+        QtWidgets.QApplication.processEvents()
+
+        def progress(done: int, total: int, label: str) -> None:
+            dlg.setMaximum(max(total, 1))
+            dlg.setValue(done)
+            dlg.setLabelText(label)
+            QtWidgets.QApplication.processEvents()
+
+        try:
+            frames, meta = self._recorder.captured_frames()
+            compiled = build_recorded_shot_audio(
+                frames,
+                meta,
+                reactor_name=self._recorder_reactor_name(),
+                progress=progress,
+            )
+            self._shot_player.load(compiled.mixed)
+            self._attach_recorder_compiled_audio(compiled.mixed)
+        except Exception as exc:  # noqa: BLE001
+            self.statusBar().showMessage(f"Recorded audio compile failed ({exc}).")
+        finally:
+            dlg.close()
+
+    def _on_play(self) -> None:
+        if self._reactor is None or not self._require_compiled():
+            return
+        self._stop_review_playback()
         self._frame = 0
-        if self._recorder.active:
-            # Fresh buffer from discharge start (skip any idle pre-Fire frames).
-            self._recorder.start(reactor_name=self._recorder_reactor_name())
-        self._auto_paused_after_shot = False
-        self.controls.set_playing(True)
-        self._on_play_toggled(True)
-        self._sync_shot_ui()
-        msg = self._reactor.shot_callout + voice_note
-        if self._recorder.active:
-            msg += "  |  Recording shot… toggle Record off to save MP4."
-        self.statusBar().showMessage(msg)
+        self._review_auto = True
+        self._play_review_segment(0, auto_continue=True)
+
+    def _on_step(self) -> None:
+        if self._reactor is None or not self._require_compiled():
+            return
+        # Step while playing only stops this segment — does not skip to the next callout.
+        if self._playback_mode is not None:
+            self._stop_review_playback(hold_frame=True)
+            self._review_segment_done = False
+            self.statusBar().showMessage(
+                f"{self._review_segments[self._review_seg_ix].subtitle}  —  "
+                "Stopped. Press Step again to replay or finish segment first."
+            )
+            return
+        if not self._review_segment_done:
+            if self._review_seg_ix >= 0:
+                self._frame = 0
+                self._review_auto = False
+                self._play_review_segment(self._review_seg_ix, auto_continue=False)
+                return
+        next_ix = 0 if self._review_seg_ix < 0 else self._review_seg_ix + 1
+        if next_ix >= len(self._review_segments):
+            self.statusBar().showMessage(
+                f"Shot review complete ({self._review_segments[-1].seq}/"
+                f"{self._review_segments[-1].total}). Press Back to revisit a step."
+            )
+            self._finish_review_session()
+            return
+        self._frame = 0
+        self._review_auto = False
+        self._review_segment_done = False
+        self._play_review_segment(next_ix, auto_continue=False)
+
+    def _on_back(self) -> None:
+        if self._reactor is None or not self._require_compiled():
+            return
+        self._stop_review_playback()
+        if self._review_seg_ix <= 0:
+            self._review_seg_ix = 0
+            self._show_review_segment(0, paused=True)
+            self.statusBar().showMessage(
+                f"{self._review_segments[0].subtitle}  —  At first step (paused)."
+            )
+            return
+        prev_ix = self._review_seg_ix - 1
+        self._review_seg_ix = prev_ix
+        self._show_review_segment(prev_ix, paused=True)
+        seg = self._review_segments[prev_ix]
+        self.statusBar().showMessage(f"{seg.subtitle}  —  Paused at step start.")
 
     def _sync_shot_ui(self) -> None:
         r = self._reactor
@@ -279,41 +517,181 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         self.controls.set_shot_status(r.shot_phase.value, r.shot_callout, r.can_fire())
         self.controls.set_skip_to_discharge(r.can_skip_to_discharge(), r.skip_to_discharge_label())
 
-    def _substeps_per_frame(self) -> int:
+    def _callout_for_phase(self, phase: str) -> str:
         r = self._reactor
         if r is None:
-            return _SUBSTEPS_PER_FRAME
-        if r.is_startup_countdown():
-            return _SUBSTEPS_PER_FRAME * _STARTUP_SUBSTEP_MULT
-        if r.is_plateau_fast_forward():
-            return _SUBSTEPS_PER_FRAME * _PLATEAU_SUBSTEP_MULT
-        if r.is_tail_fast_forward():
-            return _SUBSTEPS_PER_FRAME * _TAIL_SUBSTEP_MULT
-        return _SUBSTEPS_PER_FRAME
+            return phase
+        scripts = PHASE_NARRATION.get(self._recorder_reactor_name(), {})
+        if phase in scripts:
+            return scripts[phase].split(".")[0]
+        if phase == "armed":
+            return r.shot_ops().arm_callout
+        if phase == "quiescent":
+            return r.shot_ops().quiescent_callout
+        for p in r.shot_ops().fire_phases:
+            if p.key == phase:
+                return p.callout
+        return phase
 
-    def _hud_speed_mode(self) -> str:
-        r = self._reactor
-        if r is None:
-            return "1×"
-        if r.is_startup_countdown():
-            return f"FF×{_STARTUP_SUBSTEP_MULT}"
-        if r.is_plateau_fast_forward():
-            return f"FF×{_PLATEAU_SUBSTEP_MULT}"
-        if r.is_tail_fast_forward():
-            return f"FF×{_TAIL_SUBSTEP_MULT}"
-        return "1×"
+    def _play_review_segment(self, seg_ix: int, *, auto_continue: bool) -> None:
+        if self._reactor is None or seg_ix < 0 or seg_ix >= len(self._review_segments):
+            return
+        self._review_seg_ix = seg_ix
+        self._review_auto = auto_continue
+        self._review_segment_done = False
+        seg = self._review_segments[seg_ix]
+        self._playback_mode = "review"
+        self._playback_ix = seg.start_ix
+        self._playback_stop_ix = seg.end_ix
+        self._show_playback_frame(self._playback_ix, seg=seg)
+        if shot_audio_enabled():
+            self._shot_player.play(start_ms=seg.start_ms, end_ms=seg.speech_end_ms)
+        self._set_run_timer(True)
 
-    def _is_fast_gui_frame(self) -> bool:
-        r = self._reactor
-        if r is None:
-            return False
-        return (
-            r.is_startup_countdown()
-            or r.is_plateau_fast_forward()
-            or r.is_tail_fast_forward()
+    def _show_review_segment(self, seg_ix: int, *, paused: bool) -> None:
+        if seg_ix < 0 or seg_ix >= len(self._review_segments):
+            return
+        seg = self._review_segments[seg_ix]
+        self._review_seg_ix = seg_ix
+        self._playback_ix = seg.start_ix
+        self._show_playback_frame(seg.start_ix, seg=seg)
+        if paused and shot_audio_enabled():
+            self._shot_player.stop()
+
+    def _show_playback_frame(self, ix: int, *, seg: ReviewSegment | None = None) -> None:
+        pb = self._compiled_playback
+        if pb is None or self._reactor is None or ix < 0 or ix >= len(pb.meta):
+            return
+        self.canvas.show_playback_png(pb.canvas_frames[ix])
+        self.diagnostics.show_playback_png(pb.diag_frames[ix])
+        if self._playback_mode == "review" and seg is not None:
+            phase = seg.phase
+        else:
+            phase = pb.meta[ix].phase
+        if seg is None and self._review_segments:
+            for s in self._review_segments:
+                if s.start_ix <= ix < s.end_ix:
+                    seg = s
+                    break
+        if seg is not None:
+            self._reactor.shot_callout = seg.callout
+        else:
+            self._reactor.shot_callout = self._callout_for_phase(phase)
+        if phase == "quiescent":
+            self._reactor.shot_phase = ShotPhase.QUIESCENT
+        elif phase == "armed":
+            self._reactor.shot_phase = ShotPhase.ARMED
+        else:
+            self._reactor.shot_phase = ShotPhase.FIRING
+        self._sync_shot_ui()
+        self.canvas.update_hud(
+            gui_frame=ix,
+            substeps=_SUBSTEPS_PER_FRAME,
+            speed_mode="playback",
+            sim_time_us=0.0,
+            ops=self._reactor.shot_phase.value,
+            idle=False,
         )
+        msg = (
+            seg.subtitle
+            if seg is not None
+            else self._reactor.shot_callout
+        )
+        self.statusBar().showMessage(msg)
+
+    def _advance_playback(self) -> None:
+        pb = self._compiled_playback
+        if pb is None:
+            return
+        seg = (
+            self._review_segments[self._review_seg_ix]
+            if 0 <= self._review_seg_ix < len(self._review_segments)
+            else None
+        )
+        audio_end = (
+            seg.speech_end_ms
+            if seg is not None
+            else self._shot_player.segment_end_ms()
+        )
+        if (
+            seg is not None
+            and shot_audio_enabled()
+            and audio_end is not None
+            and self._shot_player.position_ms() >= audio_end
+        ):
+            self._playback_ix = max(seg.start_ix, seg.end_ix - 1)
+            self._end_playback_segment()
+            return
+        self._playback_ix += 1
+        if self._playback_ix >= self._playback_stop_ix:
+            self._playback_ix = max(0, self._playback_stop_ix - 1)
+            self._end_playback_segment()
+            return
+        self._show_playback_frame(self._playback_ix, seg=seg)
+
+    def _end_playback_segment(self) -> None:
+        finished_ix = self._review_seg_ix
+        auto = self._review_auto
+
+        if (
+            auto
+            and self._reactor is not None
+            and finished_ix + 1 < len(self._review_segments)
+        ):
+            self._play_review_segment(finished_ix + 1, auto_continue=True)
+            return
+
+        self._playback_mode = None
+        self._set_run_timer(False)
+        if shot_audio_enabled():
+            self._shot_player.stop()
+
+        if self._reactor is None:
+            return
+
+        seg = (
+            self._review_segments[finished_ix]
+            if 0 <= finished_ix < len(self._review_segments)
+            else None
+        )
+        if seg is not None and seg.phase == "quiescent":
+            self._finish_review_session()
+            return
+
+        self._review_segment_done = not auto
+        if seg is not None:
+            self._show_playback_frame(max(seg.start_ix, seg.end_ix - 1), seg=seg)
+
+        if seg is not None:
+            tail = "Press Step for next segment." if not auto else ""
+            if auto and finished_ix + 1 >= len(self._review_segments):
+                tail = "Full shot review complete."
+                self.controls.mark_step_done("review")
+            if self._recorder.active:
+                tail = (tail + "  |  Rec Save when done.").strip()
+            msg = f"{seg.subtitle}  —  {tail}".strip(" —")
+            self.statusBar().showMessage(msg)
+
+    def _finish_review_session(self) -> None:
+        if self._reactor is None:
+            return
+        self.controls.mark_step_done("review")
+        self._reactor.enter_quiescent()
+        self._reactor.shot_phase = ShotPhase.QUIESCENT
+        if self._review_segments:
+            self._reactor.shot_callout = self._review_segments[-1].callout
+        else:
+            self._reactor.shot_callout = self._reactor.shot_ops().quiescent_callout
+        self._auto_paused_after_shot = True
+        self.canvas.end_playback()
+        self.diagnostics.end_playback()
+        self.canvas.attach(self._reactor, self.backend.label)
+        self._sync_shot_ui()
+        self._update_readout()
 
     def _on_skip_to_discharge(self) -> None:
+        if self._playback_mode is not None:
+            return
         if self._reactor is None or not self._reactor.skip_to_discharge():
             return
         self.canvas.attach(self._reactor, self.backend.label)
@@ -323,45 +701,47 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
     def _on_controls_changed(self, values: dict) -> None:
         if self._reactor is None:
             return
+        cached_opt = get_optimize(self._recorder_reactor_name())
+        if cached_opt is not None and not controls_near(values, cached_opt.controls):
+            self.controls.unmark_steps("optimize")
+        self._clear_compiled_playback()
+        self.controls.unmark_steps("compile", "review", "rec_start", "rec_save")
         self._reactor.apply_controls(values)
         # HB11/LPP rebuild conductor masks when controls change; TAE only updates B_z.
         if self._reactor_needs_geometry_refresh():
             self.canvas.attach(self._reactor, self.backend.label)
         else:
             self.canvas.refresh()
-
-    def _on_play_toggled(self, playing: bool) -> None:
-        self._playing = playing
-        if playing and live_audio_enabled():
-            self._live_audio.set_reactor(self._recorder_reactor_name())
-            self._live_audio.start()
-        else:
-            self._live_audio.stop()
-        if playing:
-            self._timer.start()
-        else:
-            self._timer.stop()
-
-    def _on_reset(self) -> None:
-        if self._reactor is None:
-            return
-        self._on_play_toggled(False)
-        self.controls.set_playing(False)
-
-        defaults = {s.key: s.default for s in type(self._reactor).control_specs()}
-        self.controls.set_values(defaults)
-        self._reactor.apply_controls(self.controls.current_values())
-        self._reactor.reset()
-        self._frame = 0
-        self.canvas.attach(self._reactor, self.backend.label)
-        self.diagnostics.clear()
-        self._sync_shot_ui()
         self._update_readout()
-        self.statusBar().showMessage("Reset — unarmed idle.")
+        self._try_restore_compile_cache()
+
+    def _set_run_timer(self, running: bool) -> None:
+        self._playing = running
+        if not running:
+            self._shot_player.stop()
+            self._timer.stop()
+        else:
+            self._timer.start()
 
     # -- optimizer ----------------------------------------------------------
     def _on_optimize(self) -> None:
         if self._reactor is None or self._opt_thread is not None:
+            return
+        reactor_name = self._recorder_reactor_name()
+        cached = get_optimize(reactor_name)
+        if cached is not None:
+            self.controls.set_values(cached.controls)
+            self._reactor.apply_controls(self.controls.current_values())
+            self.controls.mark_step_done("optimize")
+            self._update_readout()
+            if self._try_restore_compile_cache():
+                note = "  |  Compile restored from cache."
+            else:
+                note = "  |  Press Compile (cached after first full compile)."
+            self.statusBar().showMessage(
+                f"Restored cached optimize — Q_net = {cached.q_net:.3e}  "
+                f"({cached.n_evaluations} evaluations){note}"
+            )
             return
         reactor_cls = type(self._reactor)
         self.controls.set_optimizing(True)
@@ -386,14 +766,31 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
     @QtCore.Slot(object)
     def _on_optimize_done(self, result: OptimizeResult) -> None:
         self._teardown_opt_thread()
-        # Apply the optimum to the sliders (which propagates to the live reactor).
+        self.controls.mark_step_done("optimize")
+        # Apply the optimum to the sliders (quantized); cache those values for stable keys.
         self.controls.set_values(result.controls)
-        pretty = ", ".join(f"{k}={v:.3g}" for k, v in result.controls.items())
-        self.statusBar().showMessage(
-            f"Optimal Q_net = {result.q_net:.3e}  at  {pretty}   "
-            f"({result.n_evaluations} evaluations)  |  "
-            f"Next: Record → Arm → Fire → Record off  |  Engine: {self.backend.label}"
-        )
+        if self._reactor is not None:
+            self._reactor.apply_controls(self.controls.current_values())
+            self._update_readout()
+            stored = OptimizeResult(
+                controls=self.controls.current_values(),
+                q_net=result.q_net,
+                n_evaluations=result.n_evaluations,
+            )
+            put_optimize(self._recorder_reactor_name(), stored)
+            compile_note = ""
+            if self._try_restore_compile_cache():
+                compile_note = "  |  Compile restored from cache."
+            pretty = ", ".join(
+                f"{k}={v:.3g}" for k, v in self.controls.current_values().items()
+            )
+            self.statusBar().showMessage(
+                f"Optimal Q_net = {result.q_net:.3e}  at  {pretty}   "
+                f"({result.n_evaluations} evaluations){compile_note}  |  "
+                f"Engine: {self.backend.label}"
+            )
+            return
+        put_optimize(self._recorder_reactor_name(), result)
 
     @QtCore.Slot(str)
     def _on_optimize_failed(self, message: str) -> None:
@@ -414,20 +811,29 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         slug = type(r).display_name.replace(" ", "_")
         return f"pb11_reactor_shot_{slug}.mp4"
 
-    def _on_record_toggled(self, recording: bool) -> None:
-        if recording:
-            self._recorder.start(reactor_name=self._recorder_reactor_name())
-            if self._reactor and self._reactor.shot_phase in (ShotPhase.UNARMED, ShotPhase.ARMED):
-                self.statusBar().showMessage(
-                    "Recording… Arm → Fire first, or you will capture idle frames (t stays 0)."
-                )
-            else:
-                self.statusBar().showMessage(
-                    "Recording canvas + diagnostics + phase audio… toggle again to save MP4."
-                )
+    def _on_record_start(self) -> None:
+        if not self.controls.can_run_step("rec_start")[0]:
+            self.statusBar().showMessage(self.controls.can_run_step("rec_start")[1])
             return
+        self._recorder.start(reactor_name=self._recorder_reactor_name())
+        if self._compiled_playback is not None:
+            self._attach_recorder_compiled_audio(self._compiled_playback.mixed_audio)
+        self.controls.mark_step_done("rec_start")
+        self.controls.set_recording_active(True)
+        self.statusBar().showMessage(
+            "Recording… Compile, then Play or Step through the shot, then Rec Save."
+        )
+
+    def _on_record_save(self) -> None:
+        if not self._recorder.active:
+            self.statusBar().showMessage("Rec Start first — no capture in progress.")
+            return
+        if self._recorder.has_frames() and shot_audio_enabled() and self._compiled_playback is None:
+            self._compile_recorded_audio_for_mp4()
         saved = self._recorder.stop(self, default_name=self._recording_default_name())
-        self.controls.set_recording(False)
+        self.controls.set_recording_active(False)
+        if saved[0]:
+            self.controls.mark_step_done("rec_save")
         if saved[0] and not saved[1]:
             self.statusBar().showMessage(f"Recording saved (audio + narration): {saved[0]}")
         elif saved[0] and saved[1]:
@@ -440,8 +846,25 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
     def _on_tick(self) -> None:
         if self._reactor is None:
             return
+        if self._playback_mode is not None:
+            self._advance_playback()
+            if self._recorder.active and self._compiled_playback is not None:
+                ix = max(0, min(self._playback_ix, len(self._compiled_playback.meta) - 1))
+                pb = self._compiled_playback
+                png = compose_png_horizontal(pb.canvas_frames[ix], pb.diag_frames[ix])
+                self._recorder.add_frame(
+                    png,
+                    phase=pb.meta[ix].phase,
+                    fast_forward=pb.meta[ix].fast_forward,
+                    intensity=pb.meta[ix].intensity,
+                )
+            self._frame += 1
+            if self._frame % 3 == 0:
+                self._update_readout()
+            return
+
         r = self._reactor
-        substeps = self._substeps_per_frame()
+        substeps = substeps_per_frame(r)
 
         # Play does not advance physics while unarmed / armed (by design).
         if r.shot_phase in (ShotPhase.UNARMED, ShotPhase.ARMED):
@@ -455,16 +878,15 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
                 idle=True,
             )
             if self._playing:
-                self._on_play_toggled(False)
-                self.controls.set_playing(False)
+                self._set_run_timer(False)
                 self.statusBar().showMessage(
-                    f"{r.shot_callout}  —  Press Fire to run the shot."
+                    f"{r.shot_callout}  —  Compile, then Play or Step."
                 )
             return
 
         prev_phase = r.shot_phase
-        speed_mode = self._hud_speed_mode()
-        ff = self._is_fast_gui_frame()
+        speed_mode = hud_speed_mode(r)
+        ff = is_fast_gui_frame(r)
         for _ in range(substeps):
             r.step()
         self.canvas.refresh()
@@ -479,8 +901,6 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         phase = r._fire_phase_key if r.shot_phase == ShotPhase.FIRING else r.shot_phase.value
         nbi = float(getattr(r, "_nbi_scale", 0.0))
         intensity = nbi if nbi > 0 else min(1.0, max(0.0, r.last_q_net / 1.8))
-        if self._playing and live_audio_enabled():
-            self._live_audio.feed(phase=phase, fast_forward=ff, intensity=intensity)
         if self._recorder.active:
             self._recorder.add_frame(
                 self._grab_recording_png(),
@@ -491,8 +911,9 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         if r.shot_phase == ShotPhase.FIRING:
             self.statusBar().showMessage(r.shot_callout)
         if prev_phase == ShotPhase.FIRING and r.shot_phase == ShotPhase.QUIESCENT:
-            self._on_play_toggled(False)
-            self.controls.set_playing(False)
+            if self._recorder.active and self._recorder.has_frames():
+                self._compile_recorded_audio_for_mp4()
+            self._set_run_timer(False)
             self._auto_paused_after_shot = True
             self.statusBar().showMessage(self._reactor.shot_callout)
         self._sync_shot_ui()
@@ -506,7 +927,10 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         r = self._reactor
         if r is None:
             return
-        lines = [
+        lines = self.controls.readout_control_lines()
+        if lines:
+            lines.append("")
+        lines += [
             f"Ops      = {r.shot_phase.value}",
             f"Status   = {r.shot_callout}",
             f"t        = {r.time * 1e6:10.4f} us",

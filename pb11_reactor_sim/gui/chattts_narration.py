@@ -34,7 +34,8 @@ logger = logging.getLogger(__name__)
 
 CHAT_SAMPLE_RATE = 24_000
 CHAT_VOICE_SEED = 1983
-CHAT_SPEED_LEVEL = 1
+# ChatTTS prompt speed 0–5 (lower = slower, clearer). Override: PB11_CHAT_SPEED=0
+CHAT_SPEED_LEVEL = max(0, min(5, int(os.environ.get("PB11_CHAT_SPEED", "0"))))
 #: Mandatory pause after each phase callout [s] (8 segments → +12 s minimum).
 POST_PAUSE_S = 1.5
 
@@ -56,6 +57,14 @@ _DIGIT_WORDS = {
 
 def narration_enabled() -> bool:
     return os.environ.get("PB11_SKIP_NARRATION", "").strip().lower() not in ("1", "true", "yes")
+
+
+def format_numbered_subtitle(seq: int, total: int, text: str) -> str:
+    """Prefix narration/subtitle with ``seq/total`` (1-based, 1:1 with callouts)."""
+    body = text.strip()
+    if not body:
+        return f"{seq}/{total}"
+    return f"{seq}/{total}  {body}"
 
 
 def phase_segments(meta) -> list[tuple[str, int, int]]:
@@ -175,8 +184,17 @@ def _int_to_words(n: int) -> str:
     return " ".join(_DIGIT_WORDS[d] for d in str(n))
 
 
+# Spoken replacements (TTS misreads technical terms).
+_SPEAK_ALIASES: dict[str, str] = {
+    "quiescing": "kwee essing",
+    "quiescent": "kwee essent",
+}
+
+
 def _normalize_narration_text(note: str) -> str:
     txt = sanitize_narration_line(note)
+    for src, spoken in _SPEAK_ALIASES.items():
+        txt = re.sub(rf"\b{re.escape(src)}\b", spoken, txt, flags=re.IGNORECASE)
 
     def repl(m: re.Match[str]) -> str:
         token = m.group(0)

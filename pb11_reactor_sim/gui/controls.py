@@ -27,6 +27,7 @@ from __future__ import annotations
 from PySide6 import QtCore, QtWidgets
 
 from pb11_reactor_sim.engine.base import ControlSpec
+from pb11_reactor_sim.gui.workflow import WORKFLOW_STEPS
 
 _SLIDER_TICKS = 1000
 
@@ -89,18 +90,22 @@ class ControlPanel(QtWidgets.QWidget):
 
     reactorChanged = QtCore.Signal(str)
     controlsChanged = QtCore.Signal(dict)
-    playToggled = QtCore.Signal(bool)
-    resetRequested = QtCore.Signal()
-    armRequested = QtCore.Signal()
-    fireRequested = QtCore.Signal()
+    playRequested = QtCore.Signal()
+    stepRequested = QtCore.Signal()
+    backRequested = QtCore.Signal()
+    compileRequested = QtCore.Signal()
     skipToDischargeRequested = QtCore.Signal()
     optimizeRequested = QtCore.Signal()
-    recordToggled = QtCore.Signal(bool)
+    recordStartRequested = QtCore.Signal()
+    recordSaveRequested = QtCore.Signal()
 
     def __init__(self, reactor_names: list[str], parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._values: dict[str, float] = {}
         self._sliders: list[_LabeledSlider] = []
+        self._completed: set[str] = set()
+        self._step_checks: dict[str, QtWidgets.QCheckBox] = {}
+        self._step_buttons: dict[str, QtWidgets.QPushButton] = {}
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -111,14 +116,12 @@ class ControlPanel(QtWidgets.QWidget):
         title.setWordWrap(True)
         root.addWidget(title)
 
-        # Reactor selector.
         root.addWidget(self._section_label("Reactor Model"))
         self.reactor_combo = QtWidgets.QComboBox()
         self.reactor_combo.addItems(reactor_names)
-        self.reactor_combo.currentTextChanged.connect(self.reactorChanged.emit)
+        self.reactor_combo.currentTextChanged.connect(self._on_reactor_changed)
         root.addWidget(self.reactor_combo)
 
-        # Dynamic slider container.
         root.addWidget(self._section_label("Control Inputs"))
         self._slider_box = QtWidgets.QVBoxLayout()
         self._slider_box.setSpacing(4)
@@ -126,58 +129,68 @@ class ControlPanel(QtWidgets.QWidget):
         slider_holder.setLayout(self._slider_box)
         root.addWidget(slider_holder)
 
-        # Transport buttons.
-        root.addWidget(self._section_label("Simulation"))
-        shot_row = QtWidgets.QHBoxLayout()
-        self.arm_btn = QtWidgets.QPushButton("Arm shot")
-        self.arm_btn.setStyleSheet("font-weight: 600;")
-        self.arm_btn.clicked.connect(self.armRequested.emit)
-        self.fire_btn = QtWidgets.QPushButton("Fire")
-        self.fire_btn.setStyleSheet(
-            "font-weight: 700; background-color: #b71c1c; color: #ffffff;"
-            " padding: 4px 10px; border: 1px solid #7f0000; border-radius: 3px;"
-        )
-        self.fire_btn.clicked.connect(self.fireRequested.emit)
-        shot_row.addWidget(self.arm_btn)
-        shot_row.addWidget(self.fire_btn)
-        root.addLayout(shot_row)
+        root.addWidget(self._section_label("Shot checklist"))
+        checklist = QtWidgets.QVBoxLayout()
+        checklist.setSpacing(4)
+        self.play_btn = QtWidgets.QPushButton("Play")
+        self.step_btn = QtWidgets.QPushButton("Step")
+        self.back_btn = QtWidgets.QPushButton("Back")
+        for step in WORKFLOW_STEPS:
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(6)
+            cb = QtWidgets.QCheckBox()
+            cb.setEnabled(False)
+            cb.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+            cb.setStyleSheet("color: #9cf;")
+            row.addWidget(cb, 0)
+            self._step_checks[step.step_id] = cb
+
+            if step.step_id == "review":
+                review_row = QtWidgets.QHBoxLayout()
+                review_row.setSpacing(4)
+                self.play_btn.setToolTip(
+                    "Play the full compiled shot from step 1 through the end, with voice each segment."
+                )
+                self.step_btn.setToolTip(
+                    "Play one numbered segment per press (Arm first, then each callout). "
+                    "Waits at the end — press Step again for the next. Step while playing only stops."
+                )
+                self.back_btn.setToolTip(
+                    "Jump to the previous segment and pause on its first frame."
+                )
+                for btn in (self.play_btn, self.step_btn, self.back_btn):
+                    btn.setStyleSheet("font-weight: 600;")
+                    review_row.addWidget(btn)
+                holder = QtWidgets.QWidget()
+                holder.setLayout(review_row)
+                row.addWidget(holder, 1)
+            else:
+                btn = QtWidgets.QPushButton(step.button_label)
+                btn.setToolTip(step.callout)
+                if step.step_id in ("optimize", "compile"):
+                    btn.setStyleSheet("font-weight: 600;")
+                row.addWidget(btn, 1)
+                self._step_buttons[step.step_id] = btn
+
+            checklist.addLayout(row)
+
+        self.play_btn.clicked.connect(self.playRequested.emit)
+        self.step_btn.clicked.connect(self.stepRequested.emit)
+        self.back_btn.clicked.connect(self.backRequested.emit)
+        self._step_buttons["optimize"].clicked.connect(self.optimizeRequested.emit)
+        self._step_buttons["compile"].clicked.connect(self.compileRequested.emit)
+        self._step_buttons["rec_start"].clicked.connect(self.recordStartRequested.emit)
+        self._step_buttons["rec_save"].clicked.connect(self.recordSaveRequested.emit)
+
+        checklist_holder = QtWidgets.QWidget()
+        checklist_holder.setLayout(checklist)
+        root.addWidget(checklist_holder)
 
         self.skip_btn = QtWidgets.QPushButton("Skip to flat-top")
         self.skip_btn.setVisible(False)
         self.skip_btn.clicked.connect(self.skipToDischargeRequested.emit)
         root.addWidget(self.skip_btn)
 
-        btn_row = QtWidgets.QHBoxLayout()
-        self.play_btn = QtWidgets.QPushButton("Play")
-        self.play_btn.setCheckable(True)
-        self.play_btn.toggled.connect(self._on_play)
-        self.reset_btn = QtWidgets.QPushButton("Reset")
-        self.reset_btn.setToolTip(
-            "Factory defaults and empty chamber. Does NOT keep optimized sliders — "
-            "use Arm → Fire again instead to re-run with current settings."
-        )
-        self.reset_btn.clicked.connect(self.resetRequested.emit)
-        btn_row.addWidget(self.play_btn)
-        btn_row.addWidget(self.reset_btn)
-        root.addLayout(btn_row)
-
-        self.record_btn = QtWidgets.QPushButton("Record MP4")
-        self.record_btn.setCheckable(True)
-        self.record_btn.setToolTip(
-            "Presentation capture (spatial view + graphs + facility audio + ChatTTS callouts). "
-            "Recommended: Optimize → Record ON → Arm → Fire → "
-            "Record OFF to save MP4. Idle frames before Fire are not recorded."
-        )
-        self.record_btn.toggled.connect(self._on_record)
-        root.addWidget(self.record_btn)
-
-        # Optimizer: search this reactor's control space for the best Q_net.
-        self.optimize_btn = QtWidgets.QPushButton("Solve for optimal Q_net")
-        self.optimize_btn.setStyleSheet("font-weight: 600;")
-        self.optimize_btn.clicked.connect(self.optimizeRequested.emit)
-        root.addWidget(self.optimize_btn)
-
-        # Status / readout box.
         root.addWidget(self._section_label("Live Readout"))
         self.readout = QtWidgets.QLabel("--")
         self.readout.setStyleSheet(
@@ -190,6 +203,8 @@ class ControlPanel(QtWidgets.QWidget):
 
         self.setMinimumWidth(280)
         self.setMaximumWidth(360)
+        self._wire_step_buttons()
+        self.set_review_enabled(False)
 
     @staticmethod
     def _section_label(text: str) -> QtWidgets.QLabel:
@@ -197,28 +212,59 @@ class ControlPanel(QtWidgets.QWidget):
         lab.setStyleSheet("color: #8ab; font-size: 11px; font-weight: 600; margin-top: 4px;")
         return lab
 
-    def _on_play(self, checked: bool) -> None:
-        self.play_btn.setText("Pause" if checked else "Play")
-        self.playToggled.emit(checked)
+    def _on_reactor_changed(self, name: str) -> None:
+        self.reset_workflow()
+        self.reactorChanged.emit(name)
 
-    def _on_record(self, checked: bool) -> None:
-        self.record_btn.setText("Stop & save MP4" if checked else "Record MP4")
-        self.recordToggled.emit(checked)
+    def reset_workflow(self) -> None:
+        """Clear checklist (reactor change, new shot, etc.)."""
+        self._completed.clear()
+        for cb in self._step_checks.values():
+            cb.setChecked(False)
+        self._wire_step_buttons()
 
-    def set_recording(self, active: bool) -> None:
-        self.record_btn.blockSignals(True)
-        self.record_btn.setChecked(active)
-        self.record_btn.setText("Stop & save MP4" if active else "Record MP4")
-        self.record_btn.blockSignals(False)
+    def is_step_done(self, step_id: str) -> bool:
+        return step_id in self._completed
 
-    def set_playing(self, playing: bool) -> None:
-        self.play_btn.blockSignals(True)
-        self.play_btn.setChecked(playing)
-        self.play_btn.setText("Pause" if playing else "Play")
-        self.play_btn.blockSignals(False)
+    def mark_step_done(self, step_id: str) -> None:
+        self._completed.add(step_id)
+        if step_id in self._step_checks:
+            self._step_checks[step_id].setChecked(True)
+        self._wire_step_buttons()
+
+    def unmark_steps(self, *step_ids: str) -> None:
+        """Clear checklist items (e.g. after slider change invalidates compile)."""
+        for step_id in step_ids:
+            self._completed.discard(step_id)
+            if step_id in self._step_checks:
+                self._step_checks[step_id].setChecked(False)
+        self._wire_step_buttons()
+
+    def can_run_step(self, step_id: str) -> tuple[bool, str]:
+        from pb11_reactor_sim.gui.workflow import can_run_step
+
+        return can_run_step(step_id, self._completed)
+
+    def _wire_step_buttons(self) -> None:
+        for step in WORKFLOW_STEPS:
+            if step.step_id == "review":
+                continue
+            ok, _ = self.can_run_step(step.step_id)
+            self._step_buttons[step.step_id].setEnabled(ok)
+
+    def set_recording_active(self, active: bool) -> None:
+        if active:
+            self._step_buttons["rec_start"].setEnabled(False)
+            self._step_buttons["rec_save"].setEnabled("rec_save" not in self._completed)
+        else:
+            self._wire_step_buttons()
+
+    def set_review_enabled(self, enabled: bool) -> None:
+        """Enable Play / Step / Back after a successful compile."""
+        for btn in (self.play_btn, self.step_btn, self.back_btn):
+            btn.setEnabled(enabled)
 
     def rebuild_sliders(self, specs: list[ControlSpec]) -> None:
-        """Replace the slider stack for a newly selected reactor."""
         while self._slider_box.count():
             item = self._slider_box.takeAt(0)
             w = item.widget()
@@ -242,36 +288,43 @@ class ControlPanel(QtWidgets.QWidget):
         return dict(self._values)
 
     def set_values(self, values: dict[str, float]) -> None:
-        """Programmatically move sliders to ``values`` (e.g. optimizer result)."""
         for slider in self._sliders:
             if slider.spec.key in values:
                 slider.set_value(values[slider.spec.key])
                 self._values[slider.spec.key] = slider.value()
 
     def set_optimizing(self, busy: bool) -> None:
-        """Reflect optimizer activity in the button and disable it while busy."""
-        self.optimize_btn.setEnabled(not busy)
-        self.optimize_btn.setText("Optimizing..." if busy else "Solve for optimal Q_net")
+        btn = self._step_buttons["optimize"]
+        if busy:
+            btn.setEnabled(False)
+            btn.setText("Optimizing…")
+        else:
+            btn.setText("Optimize")
+            self._wire_step_buttons()
+
+    def set_compiling(self, busy: bool) -> None:
+        btn = self._step_buttons["compile"]
+        if busy:
+            btn.setEnabled(False)
+            btn.setText("Compiling…")
+        else:
+            btn.setText("Compile")
+            self._wire_step_buttons()
+
+    def readout_control_lines(self) -> list[str]:
+        lines: list[str] = []
+        for slider in self._sliders:
+            spec = slider.spec
+            unit = f" {spec.units}" if spec.units else ""
+            lines.append(f"{spec.label:12s} = {slider.value():10.3g}{unit}")
+        return lines
 
     def update_readout(self, text: str) -> None:
         self.readout.setText(text)
 
-    def set_fire_enabled(self, enabled: bool) -> None:
-        self.fire_btn.setEnabled(enabled)
-
     def set_shot_status(self, phase: str, callout: str, can_fire: bool) -> None:
-        self.arm_btn.setToolTip("Prepare vacuum, fuel, and power systems for the next shot.")
-        self.fire_btn.setToolTip(
-            "Run the automated discharge sequence. Pre-discharge countdown runs "
-            "fast-forward; flat-top / pulse / pinch play at normal speed."
-        )
-        self.fire_btn.setText("Fire" if can_fire else "Fire (arm first)")
-        self.set_fire_enabled(can_fire)
+        del can_fire  # live fire removed; review uses compiled playback
 
     def set_skip_to_discharge(self, visible: bool, label: str = "Skip to flat-top") -> None:
         self.skip_btn.setVisible(visible)
         self.skip_btn.setText(label)
-        self.skip_btn.setToolTip(
-            "Jump past the countdown straight to the main discharge phase "
-            "(flat-top, laser pulse, or pinch)."
-        )

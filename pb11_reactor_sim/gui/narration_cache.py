@@ -114,7 +114,7 @@ def cache_path_for_text(text: str) -> Path:
 
 def _cache_key(text: str) -> str:
     payload = (
-        f"v2|seed={CHAT_VOICE_SEED}|speed={CHAT_SPEED_LEVEL}|sr={SAMPLE_RATE}"
+        f"v4|seed={CHAT_VOICE_SEED}|speed={CHAT_SPEED_LEVEL}|sr={SAMPLE_RATE}"
         f"|trailer={PLAYBACK_TRAILER_S}|{text}"
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]

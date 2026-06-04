@@ -26,19 +26,15 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
 
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 
-from pb11_reactor_sim.gui.audio_synth import (
-    FPS,
-    FrameMeta,
-    mix_tracks,
-    pad_audio,
-    synthesize_shot_audio,
-    write_wav,
-)
+import numpy as np
+
+from pb11_reactor_sim.gui.audio_synth import FPS, SAMPLE_RATE, FrameMeta, pad_audio, write_wav
 from pb11_reactor_sim.gui.chattts_narration import narration_enabled
 from pb11_reactor_sim.gui.export_timeline import BED_DUCK_FACTOR, BED_LEVEL, ExportTimeline, build_export_timeline
 
@@ -52,13 +48,27 @@ class FrameRecorder:
         self._frames: list[bytes] = []
         self._meta: list[FrameMeta] = []
         self._reactor_name: str = ""
+        self._frame_size: tuple[int, int] | None = None
+        self._compiled_mixed: np.ndarray | None = None
         self.active = False
+
+    def set_compiled_audio(self, mixed: np.ndarray) -> None:
+        """Use pre-mixed compile audio for MP4 mux (matches Play/Step review)."""
+        self._compiled_mixed = np.asarray(mixed, dtype=np.float32).reshape(-1)
 
     def start(self, *, reactor_name: str = "") -> None:
         self._frames.clear()
         self._meta.clear()
         self._reactor_name = reactor_name
+        self._frame_size = None
+        self._compiled_mixed = None
         self.active = True
+
+    def has_frames(self) -> bool:
+        return bool(self._frames)
+
+    def captured_frames(self) -> tuple[list[bytes], list[FrameMeta]]:
+        return self._frames, self._meta
 
     def add_frame(
         self,
@@ -69,7 +79,10 @@ class FrameRecorder:
         intensity: float = 0.0,
     ) -> None:
         if self.active and png:
-            self._frames.append(_normalize_png_for_video(png))
+            norm, size = _normalize_png_for_video(png, self._frame_size)
+            if self._frame_size is None:
+                self._frame_size = size
+            self._frames.append(norm)
             self._meta.append(
                 FrameMeta(phase=phase, fast_forward=fast_forward, intensity=intensity)
             )
@@ -102,47 +115,81 @@ class FrameRecorder:
         if not path:
             return None, None
         out = Path(path)
-        if out.suffix.lower() == ".png":
-            return self._write_png_sequence(out), None
-        return self._write_mp4(out, parent=parent)
+        dlg = QtWidgets.QProgressDialog(
+            "Preparing export…",
+            None,
+            0,
+            4,
+            parent,
+        )
+        dlg.setWindowTitle("Save MP4")
+        dlg.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        dlg.show()
+        QtWidgets.QApplication.processEvents()
+
+        def progress(step: int, label: str) -> None:
+            dlg.setMaximum(4)
+            dlg.setValue(min(step, 4))
+            dlg.setLabelText(label)
+            QtWidgets.QApplication.processEvents()
+
+        try:
+            if out.suffix.lower() == ".png":
+                progress(1, "Writing PNG sequence…")
+                return self._write_png_sequence(out), None
+            return self._write_mp4(out, parent=parent, progress=progress)
+        finally:
+            dlg.close()
 
     def _write_mp4(
         self,
         path: Path,
         *,
         parent: QtWidgets.QWidget | None = None,
+        progress: Callable[[int, str], None] | None = None,
     ) -> tuple[str | None, str | None]:
+        def step(i: int, label: str) -> None:
+            if progress is not None:
+                progress(i, label)
+
+        step(
+            0,
+            "Building narration timeline (voice, subtitles, holds)…"
+            if narration_enabled()
+            else "Building export timeline…",
+        )
         timeline = self._build_export_timeline(parent)
         frames = timeline.frames if timeline else self._frames
         meta = timeline.meta if timeline else self._meta
 
+        step(1, f"Encoding video ({len(frames)} frames)…")
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg:
             ff_err = self._write_mp4_ffmpeg(frames, path, ffmpeg)
             if ff_err is None:
-                return self._mux_export_audio(path, timeline, meta, parent=parent)
+                step(2, "Mixing reactor bed and narration…")
+                saved = self._mux_export_audio(path, timeline, meta, parent=parent)
+                step(3, "MP4 save complete.")
+                return saved
             err = ff_err
         else:
             err = self._write_mp4_imageio(frames, path)
             if err is None:
-                return self._mux_export_audio(path, timeline, meta, parent=parent)
+                step(2, "Mixing reactor bed and narration…")
+                saved = self._mux_export_audio(path, timeline, meta, parent=parent)
+                step(3, "MP4 save complete.")
+                return saved
 
+        step(2, "Saving PNG fallback…")
         fallback = self._write_png_sequence(path.with_suffix(".png"))
+        step(3, "Finished (fallback).")
         return fallback, (
             f"MP4 encode failed ({err}); saved PNG sequence instead:\n{fallback}"
         )
 
     def _build_export_timeline(self, parent: QtWidgets.QWidget | None):
-        if parent is not None:
-            win = parent if isinstance(parent, QtWidgets.QMainWindow) else parent.window()
-            if isinstance(win, QtWidgets.QMainWindow):
-                msg = (
-                    "Building narration timeline (voice, subtitles, holds)…"
-                    if narration_enabled()
-                    else "Building export timeline…"
-                )
-                win.statusBar().showMessage(msg)
-            QtWidgets.QApplication.processEvents()
         try:
             return build_export_timeline(
                 self._frames,
@@ -176,18 +223,25 @@ class FrameRecorder:
                     win.statusBar().showMessage("Mixing reactor bed and narration…")
                 QtWidgets.QApplication.processEvents()
 
-            bed = synthesize_shot_audio(meta, fps=FPS)
-            narr = timeline.narration if timeline else None
-            voice_mask = timeline.voice_mask if timeline else None
-            n_samples = max(bed.size, narr.size if narr is not None else 0)
-            bed = pad_audio(bed, n_samples)
-            mixed = mix_tracks(
-                bed,
-                narr,
-                bed_level=BED_LEVEL,
-                duck_with_voice=BED_DUCK_FACTOR,
-                voice_mask=voice_mask,
-            )
+            if self._compiled_mixed is not None and self._compiled_mixed.size:
+                mixed = self._compiled_mixed
+            elif timeline is not None:
+                from pb11_reactor_sim.gui.shot_audio import mix_shot_audio
+
+                mixed = mix_shot_audio(timeline.meta, timeline.segments, timeline.duration_s)
+            else:
+                from pb11_reactor_sim.gui.audio_synth import synthesize_shot_audio
+                from pb11_reactor_sim.gui.export_timeline import BED_DUCK_FACTOR, BED_LEVEL, mix_tracks
+
+                bed = synthesize_shot_audio(meta, fps=FPS)
+                n_samples = bed.size
+                mixed = mix_tracks(bed, None, bed_level=BED_LEVEL)
+
+            if timeline is not None:
+                n_samples = int(round(timeline.duration_s * SAMPLE_RATE))
+            else:
+                n_samples = mixed.size
+            mixed = pad_audio(mixed, max(n_samples, mixed.size))
 
             with tempfile.TemporaryDirectory(prefix="pb11_mux_") as tmp:
                 td = Path(tmp)
@@ -296,8 +350,12 @@ def compose_png_horizontal(
         return left
 
 
-def _normalize_png_for_video(png: bytes) -> bytes:
+def _normalize_png_for_video(
+    png: bytes,
+    frame_size: tuple[int, int] | None = None,
+) -> tuple[bytes, tuple[int, int]]:
     """Crop to even width/height so H.264 encoders accept the frames."""
+    del frame_size  # reserved for future fixed-size capture
     try:
         from PIL import Image
 
@@ -305,11 +363,11 @@ def _normalize_png_for_video(png: bytes) -> bytes:
         w, h = img.size
         ew, eh = w - (w % 2), h - (h % 2)
         if ew < 2 or eh < 2:
-            return png
+            return png, (w, h)
         if (ew, eh) != (w, h):
             img = img.crop((0, 0, ew, eh))
         out = BytesIO()
         img.save(out, format="PNG")
-        return out.getvalue()
+        return out.getvalue(), (ew, eh)
     except ImportError:
-        return png
+        return png, (0, 0)

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from pb11_reactor_sim.engine.base import Diagnostics
 
@@ -116,6 +116,31 @@ class DiagnosticsPanel(QtWidgets.QWidget):
 
         self.curve_q.setData(t, np.maximum(np.asarray(diag.q_net), eps))
         self.curve_q_plasma.setData(t, np.maximum(np.asarray(diag.q_plasma), eps))
+
+    def show_playback_png(self, png: bytes | None) -> None:
+        if not hasattr(self, "_playback_label"):
+            self._playback_label = QtWidgets.QLabel(self)
+            self._playback_label.setScaledContents(True)
+            self._playback_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        if not png:
+            self.end_playback()
+            return
+        pix = QtGui.QPixmap()
+        if not pix.loadFromData(png):
+            return
+        self._playback_label.setPixmap(pix)
+        self._playback_label.resize(self.size())
+        self._playback_label.raise_()
+        self._playback_label.show()
+
+    def end_playback(self) -> None:
+        if hasattr(self, "_playback_label"):
+            self._playback_label.hide()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "_playback_label") and self._playback_label.isVisible():
+            self._playback_label.resize(self.size())
 
     def grab_frame_png(self) -> bytes | None:
         """Return a PNG snapshot of the diagnostic charts (for MP4 export)."""

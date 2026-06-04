@@ -27,10 +27,10 @@ import numpy as np
 from pb11_reactor_sim.gui.audio_synth import FPS, SAMPLE_RATE, FrameMeta, pad_audio
 from pb11_reactor_sim.gui.chattts_narration import (
     POST_PAUSE_S,
+    _normalize_narration_text,
+    format_numbered_subtitle,
     narration_enabled,
     phase_segments,
-    sanitize_narration_line,
-    synthesize_speech,
 )
 from pb11_reactor_sim.gui.narration_scripts import PHASE_NARRATION
 from pb11_reactor_sim.gui.video_subtitles import burn_subtitle
@@ -59,6 +59,101 @@ class ExportTimeline:
     narration: np.ndarray
     voice_mask: np.ndarray
     duration_s: float
+    diag_frames: list[bytes] | None = None
+
+
+def speech_for_phase_line(
+    raw_line: str,
+    *,
+    sample_rate: int = SAMPLE_RATE,
+) -> tuple[np.ndarray, float, str]:
+    """Cached speech for timeline assembly.
+
+    Returns ``(full_audio, core_duration_s, display_text)``. Core duration
+    excludes the playback trailer so segment windows match callouts.
+    """
+    if not narration_enabled() or not raw_line.strip():
+        return np.zeros(0, dtype=np.float32), 0.0, ""
+    from pb11_reactor_sim.gui.narration_cache import (
+        PLAYBACK_TRAILER_S,
+        synthesize_and_cache,
+    )
+
+    text = _normalize_narration_text(raw_line)
+    full = synthesize_and_cache(text)
+    trailer_n = int(round(PLAYBACK_TRAILER_S * sample_rate))
+    core = full[:-trailer_n] if full.size > trailer_n else full
+    core_dur = core.size / sample_rate if core.size else 0.0
+    return full, core_dur, text
+
+
+def _phase_stretch_plan(
+    meta: list[FrameMeta],
+    *,
+    reactor_name: str,
+    fps: float = FPS,
+    sample_rate: int = SAMPLE_RATE,
+) -> tuple[list[tuple[str, int, int, int, TimelineSegment | None, str | None]], float]:
+    """Per phase: (phase, start, end, n_out, segment, subtitle_text), total duration [s]."""
+    scripts = PHASE_NARRATION.get(reactor_name, PHASE_NARRATION["TAE FRC"])
+    phase_runs = phase_segments(meta)
+    n_phases = len(phase_runs)
+    plans: list[tuple[str, int, int, int, TimelineSegment | None, str | None]] = []
+    cursor_s = 0.0
+
+    for seq, (phase, start_f, end_f) in enumerate(phase_runs, start=1):
+        clip_len = end_f - start_f
+        if clip_len <= 0:
+            continue
+
+        raw_line = scripts.get(phase)
+        segment: TimelineSegment | None = None
+        subtitle: str | None = None
+        if raw_line and narration_enabled():
+            speech, speech_dur_s, text = speech_for_phase_line(raw_line, sample_rate=sample_rate)
+            window_s = speech_dur_s + POST_PAUSE_S
+            n_out = max(clip_len, max(1, int(math.ceil(window_s * fps))))
+            if speech.size:
+                segment = TimelineSegment(
+                    phase=phase,
+                    text=text,
+                    speech=speech,
+                    speech_dur_s=speech_dur_s,
+                    start_s=cursor_s,
+                    end_s=cursor_s + window_s,
+                )
+                subtitle = format_numbered_subtitle(seq, n_phases, text)
+        else:
+            n_out = clip_len
+
+        plans.append((phase, start_f, end_f, n_out, segment, subtitle))
+        cursor_s += n_out / fps
+
+    return plans, cursor_s
+
+
+def stretch_clips_with_plan(
+    frames: list[bytes],
+    meta: list[FrameMeta],
+    plans: list[tuple[str, int, int, int, TimelineSegment | None, str | None]],
+    *,
+    with_subtitles: bool = False,
+) -> tuple[list[bytes], list[FrameMeta]]:
+    """Apply a shared narration-first stretch plan to one frame list."""
+    out_frames: list[bytes] = []
+    out_meta: list[FrameMeta] = []
+    for _phase, start_f, end_f, n_out, _segment, subtitle in plans:
+        clip = frames[start_f:end_f]
+        clip_meta = meta[start_f:end_f]
+        if not clip:
+            continue
+        stretched = _stretch_frames(clip, n_out)
+        stretched_meta = _stretch_meta(clip_meta, n_out)
+        sub = subtitle if with_subtitles and subtitle else None
+        for png in stretched:
+            out_frames.append(burn_subtitle(png, sub) if sub else png)
+        out_meta.extend(stretched_meta)
+    return out_frames, out_meta
 
 
 def build_export_timeline(
@@ -71,49 +166,13 @@ def build_export_timeline(
     with_subtitles: bool = True,
 ) -> ExportTimeline:
     """Synthesize narration first, then stretch/hold source frames to fit."""
-    scripts = PHASE_NARRATION.get(reactor_name, PHASE_NARRATION["TAE FRC"])
-    out_frames: list[bytes] = []
-    out_meta: list[FrameMeta] = []
-    segments: list[TimelineSegment] = []
-    cursor_s = 0.0
-
-    for phase, start_f, end_f in phase_segments(meta):
-        clip = frames[start_f:end_f]
-        clip_meta = meta[start_f:end_f]
-        if not clip:
-            continue
-
-        raw_line = scripts.get(phase)
-        if raw_line and narration_enabled():
-            text = sanitize_narration_line(raw_line)
-            speech = synthesize_speech(text)
-            speech_dur_s = speech.size / sample_rate if speech.size else 0.0
-            window_s = speech_dur_s + POST_PAUSE_S
-            n_out = max(len(clip), max(1, int(math.ceil(window_s * fps))))
-            stretched = _stretch_frames(clip, n_out)
-            stretched_meta = _stretch_meta(clip_meta, n_out)
-            if speech.size:
-                segments.append(
-                    TimelineSegment(
-                        phase=phase,
-                        text=text,
-                        speech=speech,
-                        speech_dur_s=speech_dur_s,
-                        start_s=cursor_s,
-                        end_s=cursor_s + window_s,
-                    )
-                )
-            for png in stretched:
-                sub = text if with_subtitles and speech.size else None
-                out_frames.append(burn_subtitle(png, sub) if sub else png)
-            out_meta.extend(stretched_meta)
-            cursor_s += n_out / fps
-        else:
-            out_frames.extend(clip)
-            out_meta.extend(clip_meta)
-            cursor_s += len(clip) / fps
-
-    duration_s = cursor_s
+    plans, duration_s = _phase_stretch_plan(
+        meta, reactor_name=reactor_name, fps=fps, sample_rate=sample_rate
+    )
+    segments = [p[4] for p in plans if p[4] is not None]
+    out_frames, out_meta = stretch_clips_with_plan(
+        frames, meta, plans, with_subtitles=with_subtitles
+    )
     narr, voice_mask = _assemble_narration(segments, duration_s, sample_rate)
     return ExportTimeline(
         frames=out_frames,
@@ -122,6 +181,34 @@ def build_export_timeline(
         narration=narr,
         voice_mask=voice_mask,
         duration_s=duration_s,
+    )
+
+
+def build_playback_timeline(
+    canvas_frames: list[bytes],
+    diag_frames: list[bytes],
+    meta: list[FrameMeta],
+    *,
+    reactor_name: str,
+    fps: float = FPS,
+    sample_rate: int = SAMPLE_RATE,
+) -> ExportTimeline:
+    """Stretch canvas + diagnostics in lockstep; mix narration (no subtitles)."""
+    plans, duration_s = _phase_stretch_plan(
+        meta, reactor_name=reactor_name, fps=fps, sample_rate=sample_rate
+    )
+    segments = [p[4] for p in plans if p[4] is not None]
+    out_canvas, out_meta = stretch_clips_with_plan(canvas_frames, meta, plans)
+    out_diag, _ = stretch_clips_with_plan(diag_frames, meta, plans)
+    narr, voice_mask = _assemble_narration(segments, duration_s, sample_rate)
+    return ExportTimeline(
+        frames=out_canvas,
+        meta=out_meta,
+        segments=segments,
+        narration=narr,
+        voice_mask=voice_mask,
+        duration_s=duration_s,
+        diag_frames=out_diag,
     )
 
 
@@ -159,10 +246,13 @@ def _assemble_narration(
     mask = np.zeros(n, dtype=np.float32)
     for seg in segments:
         offset = int(round(seg.start_s * sample_rate))
-        end = min(n, offset + seg.speech.size)
-        m = end - offset
-        if m > 0:
-            track[offset:end] += seg.speech[:m]
+        core_n = min(
+            int(round(seg.speech_dur_s * sample_rate)),
+            int(seg.speech.size),
+        )
+        if core_n > 0:
+            end = min(n, offset + core_n)
+            track[offset:end] += seg.speech[: core_n]
         # Duck reactor bed for the full segment window (speech + post-pause).
         win_end = min(n, int(round(seg.end_s * sample_rate)))
         if win_end > offset:

@@ -62,6 +62,11 @@ class ReactorCanvas(QtWidgets.QWidget):
         self._glw = pg.GraphicsLayoutWidget()
         layout.addWidget(self._glw)
 
+        self._playback_label = QtWidgets.QLabel(self._glw)
+        self._playback_label.setScaledContents(True)
+        self._playback_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._playback_label.hide()
+
         self._plot: pg.PlotItem = self._glw.addPlot()
         self._plot.setAspectLocked(True)
         self._plot.showGrid(x=True, y=True, alpha=0.15)
@@ -349,7 +354,7 @@ class ReactorCanvas(QtWidgets.QWidget):
             return
         g = reactor.grid
         if idle:
-            line2 = f"Ops: {ops}  —  press Fire to run"
+            line2 = f"Ops: {ops}  —  Compile, then Play or Step"
         else:
             line2 = f"t = {sim_time_us:.3f} µs"
         self._hud_text.setText(
@@ -359,6 +364,27 @@ class ReactorCanvas(QtWidgets.QWidget):
         self._hud_text.setColor((0, 0, 0))
         self._hud_text.fill = pg.mkBrush(255, 255, 255, 210)
         self._hud_text.border = pg.mkPen(0, 0, 0, width=2)
+
+    def show_playback_png(self, png: bytes | None) -> None:
+        """Display a pre-rendered PNG over the live plot (compile playback)."""
+        if not png:
+            self.end_playback()
+            return
+        pix = QtGui.QPixmap()
+        if not pix.loadFromData(png):
+            return
+        self._playback_label.setPixmap(pix)
+        self._playback_label.resize(self._glw.size())
+        self._playback_label.raise_()
+        self._playback_label.show()
+
+    def end_playback(self) -> None:
+        self._playback_label.hide()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if self._playback_label.isVisible():
+            self._playback_label.resize(self._glw.size())
 
     def grab_frame_png(self) -> bytes | None:
         """Return a PNG snapshot of the plot widget (for MP4 export)."""
