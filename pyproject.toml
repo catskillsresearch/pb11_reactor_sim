@@ -1,0 +1,40 @@
+[tool.poetry]
+name = "pb11_reactor_sim"
+version = "0.1"
+description = ""
+authors = ["Catskills Research Company"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+# PySide6 (simulator group) requires Python <3.15 — keep upper bound explicit.
+python = ">=3.12,<3.15"
+numpy = "^2.0"
+scipy = "^1.17.1"
+pyqtgraph = "^0.14.0"
+pillow = "^12.2.0"
+chattts = {extras = ["ui"], version = "^0.2.5"}
+requests = "^2.32"
+# Must match the installed torch wheel (e.g. 2.10.0+cu128). Unpinned torchaudio 2.11
+# breaks ChatTTS with "_torchaudio.abi3.so" / libcudart load errors.
+torchaudio = "2.10.0"
+
+[tool.poetry.group.simulator]
+optional = true
+
+[tool.poetry.group.simulator.dependencies]
+PySide6 = ">=6.8,<6.12"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+warn_return_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+check_untyped_defs = true
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

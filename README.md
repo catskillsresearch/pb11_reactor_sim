@@ -4,6 +4,32 @@ An AI-assisted 2D simulation of various proton-boron fusion reactors described i
 
 *Note on Development: This codebase was generated using Large Language Model (LLM) AI tools. The code serves as a computational interpretation of public documentation and may contain AI-generated artifacts, structural anomalies, or mathematical hallucinations. It must be rigorously verified by the user before any application.*
 
+## Installation notes
+
+Requires [Poetry](https://python-poetry.org/) and Python 3.12–3.14 (see `pyproject.toml`).
+
+```bash
+# From the repository root (the directory that contains pyproject.toml):
+poetry install --with simulator
+./pb11_reactor_sim/run.sh
+```
+
+**Why `--with simulator`?** The GUI depends on **PySide6** (Qt). That package is in an optional Poetry group named `simulator`, not in the default install:
+
+- `poetry install` — core numerics and export stack only (`numpy`, `scipy`, `pyqtgraph`, `pillow`, narration deps, etc.).
+- `poetry install --with simulator` — also installs **PySide6**, which `python -m pb11_reactor_sim` needs for the dashboard.
+
+Without `--with simulator`, imports such as `from PySide6 import QtWidgets` will fail.
+
+Alternatively, after install:
+
+```bash
+poetry run python -m pb11_reactor_sim
+```
+
+Simulator architecture, controls, and physics are documented in [`pb11_reactor_sim/README.md`](pb11_reactor_sim/README.md).
+
+**Voice callouts (ChatTTS)** need the `requests` package (pulled in via Poetry). On first launch the app precomputes all phase callouts into `.cache/narration/` before the window opens; later launches load from disk. Reactor facility sounds are procedural NumPy synthesis and stay fast. Set `PB11_SKIP_NARRATION=1` for bed-only export, `PB11_SKIP_CACHE_WARM=1` to skip startup precompute, or `PB11_SKIP_LIVE_AUDIO=1` to keep export narration but mute speakers during Play.
 
 ## Contributions and Collaboration
 
