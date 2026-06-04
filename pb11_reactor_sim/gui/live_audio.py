@@ -198,6 +198,17 @@ class LiveShotAudio:
     def _push_pcm(self, samples: np.ndarray) -> None:
         if self._io is None:
             return
+        from PySide6 import QtCore
+
         pcm = np.clip(samples, -1.0, 1.0)
         pcm_i16 = (pcm * 32767.0).astype(np.int16)
-        self._io.write(pcm_i16.tobytes())
+        data = pcm_i16.tobytes()
+        offset = 0
+        while offset < len(data):
+            n = self._io.write(data[offset:])
+            if n < 0:
+                break
+            if n == 0:
+                QtCore.QCoreApplication.processEvents()
+                continue
+            offset += n

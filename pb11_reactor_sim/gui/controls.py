@@ -133,7 +133,10 @@ class ControlPanel(QtWidgets.QWidget):
         self.arm_btn.setStyleSheet("font-weight: 600;")
         self.arm_btn.clicked.connect(self.armRequested.emit)
         self.fire_btn = QtWidgets.QPushButton("Fire")
-        self.fire_btn.setStyleSheet("font-weight: 700; color: #ffcccc;")
+        self.fire_btn.setStyleSheet(
+            "font-weight: 700; background-color: #b71c1c; color: #ffffff;"
+            " padding: 4px 10px; border: 1px solid #7f0000; border-radius: 3px;"
+        )
         self.fire_btn.clicked.connect(self.fireRequested.emit)
         shot_row.addWidget(self.arm_btn)
         shot_row.addWidget(self.fire_btn)
@@ -177,7 +180,10 @@ class ControlPanel(QtWidgets.QWidget):
         # Status / readout box.
         root.addWidget(self._section_label("Live Readout"))
         self.readout = QtWidgets.QLabel("--")
-        self.readout.setStyleSheet("color: #9fe; font-family: monospace; font-size: 11px;")
+        self.readout.setStyleSheet(
+            "color: #0f172a; background-color: #f1f5f9; font-family: monospace;"
+            " font-size: 11px; padding: 6px; border: 1px solid #94a3b8; border-radius: 3px;"
+        )
         self.readout.setWordWrap(True)
         self.readout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
         root.addWidget(self.readout, stretch=1)
