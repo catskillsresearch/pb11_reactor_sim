@@ -54,6 +54,23 @@ _FRAME_INTERVAL_MS = 33
 _SAMPLES_PER_TICK = int(round(48_000 * _FRAME_INTERVAL_MS / 1000))
 
 
+class _NarrationCacheWorker(QtCore.QObject):
+    """Precompute ChatTTS clips off the GUI thread (used when startup warm was skipped)."""
+
+    finished = QtCore.Signal(int, int)
+
+    def __init__(self, reactor_name: str) -> None:
+        super().__init__()
+        self._reactor_name = reactor_name
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        from pb11_reactor_sim.gui.narration_cache import ensure_narration_cache, lines_for_reactor
+
+        cached, synthesized = ensure_narration_cache(lines_for_reactor(self._reactor_name))
+        self.finished.emit(cached, synthesized)
+
+
 class _OptimizeWorker(QtCore.QObject):
     """Runs the Q_net control-space search off the GUI thread."""
 
@@ -123,6 +140,8 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         # Optimizer worker thread handles (kept alive while running).
         self._opt_thread: QtCore.QThread | None = None
         self._opt_worker: _OptimizeWorker | None = None
+        self._narr_thread: QtCore.QThread | None = None
+        self._narr_worker: _NarrationCacheWorker | None = None
 
         # --- simulation timer ---
         self._timer = QtCore.QTimer(self)
@@ -160,6 +179,48 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         )
         self._sync_shot_ui()
         self._update_readout()
+        self._warm_reactor_narration_async(name)
+
+    def _warm_reactor_narration_async(self, reactor_name: str) -> None:
+        from pb11_reactor_sim.gui.narration_cache import cache_ready_for_reactor
+
+        if not narration_enabled() or cache_ready_for_reactor(reactor_name):
+            return
+        self._teardown_narr_thread()
+        self.statusBar().showMessage(f"Finishing voice cache for {reactor_name}…")
+        thread = QtCore.QThread(self)
+        worker = _NarrationCacheWorker(reactor_name)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_narration_cache_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_narr_thread)
+        self._narr_thread = thread
+        self._narr_worker = worker
+        thread.start()
+
+    def _teardown_narr_thread(self) -> None:
+        if self._narr_thread is not None and self._narr_thread.isRunning():
+            self._narr_thread.quit()
+            self._narr_thread.wait(2000)
+        self._narr_thread = None
+        self._narr_worker = None
+
+    @QtCore.Slot(int, int)
+    def _on_narration_cache_finished(self, cached: int, synthesized: int) -> None:
+        if synthesized:
+            self.statusBar().showMessage(
+                f"Voice ready for this reactor ({synthesized} new, {cached} cached)."
+            )
+        else:
+            self.statusBar().showMessage(f"Voice cache ready ({cached} clip(s)).")
+
+    @QtCore.Slot()
+    def _clear_narr_thread(self) -> None:
+        self._narr_thread = None
+        self._narr_worker = None
 
     def _on_arm(self) -> None:
         if self._reactor is None:
@@ -181,7 +242,12 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         )
         self._sync_shot_ui()
         self._update_readout()
-        self.statusBar().showMessage(self._reactor.shot_callout)
+        self._live_audio.set_reactor(self._recorder_reactor_name())
+        if not self._live_audio.play_phase_callout("armed"):
+            hint = " (voice cache still warming)" if narration_enabled() else ""
+            self.statusBar().showMessage(f"{self._reactor.shot_callout}{hint}")
+        else:
+            self.statusBar().showMessage(self._reactor.shot_callout)
 
     def _recorder_reactor_name(self) -> str:
         return type(self._reactor).display_name if self._reactor is not None else ""
@@ -189,6 +255,12 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
     def _on_fire(self) -> None:
         if self._reactor is None or not self._reactor.fire_shot():
             return
+        from pb11_reactor_sim.gui.narration_cache import cache_ready_for_reactor
+
+        name = self._recorder_reactor_name()
+        voice_note = ""
+        if narration_enabled() and not cache_ready_for_reactor(name):
+            voice_note = f"  |  Voice cache still building for {name}."
         self._frame = 0
         if self._recorder.active:
             # Fresh buffer from discharge start (skip any idle pre-Fire frames).
@@ -197,7 +269,7 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         self.controls.set_playing(True)
         self._on_play_toggled(True)
         self._sync_shot_ui()
-        msg = self._reactor.shot_callout
+        msg = self._reactor.shot_callout + voice_note
         if self._recorder.active:
             msg += "  |  Recording shot… toggle Record off to save MP4."
         self.statusBar().showMessage(msg)
@@ -479,9 +551,12 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
 
 
 def _warm_narration_cache(app: QtWidgets.QApplication) -> None:
-    """Precompute ChatTTS clips before the dashboard opens (first run is slow)."""
+    """Precompute all fixed callout strings before the dashboard opens."""
     import os
 
+    from pb11_reactor_sim.gui.narration_cache import all_narration_lines, ensure_cache_dir
+
+    ensure_cache_dir()
     if not narration_enabled():
         return
     if os.environ.get("PB11_SKIP_CACHE_WARM", "").strip().lower() in ("1", "true", "yes"):
@@ -489,11 +564,12 @@ def _warm_narration_cache(app: QtWidgets.QApplication) -> None:
 
     from pb11_reactor_sim.gui.narration_cache import ensure_narration_cache
 
+    n_lines = len(all_narration_lines())
     dlg = QtWidgets.QProgressDialog(
-        "Preparing voice callouts (first run may take a few minutes)…",
+        f"Preparing {n_lines} voice callouts (first run may take a few minutes)…",
         None,
         0,
-        1,
+        max(n_lines, 1),
         None,
     )
     dlg.setWindowTitle("p-11B Reactor Simulator")
@@ -522,6 +598,9 @@ def main() -> int:
     """Application entry point."""
     import sys
 
+    from pb11_reactor_sim.gui.narration_cache import ensure_cache_dir
+
+    ensure_cache_dir()
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     _warm_narration_cache(app)
     window = PlasmaSimApp()

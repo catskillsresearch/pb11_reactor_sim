@@ -29,7 +29,7 @@ poetry run python -m pb11_reactor_sim
 
 Simulator architecture, controls, and physics are documented in [`pb11_reactor_sim/README.md`](pb11_reactor_sim/README.md).
 
-**Voice callouts (ChatTTS)** need the `requests` package (pulled in via Poetry). On first launch the app precomputes all phase callouts into `.cache/narration/` before the window opens; later launches load from disk. Reactor facility sounds are procedural NumPy synthesis and stay fast. Set `PB11_SKIP_NARRATION=1` for bed-only export, `PB11_SKIP_CACHE_WARM=1` to skip startup precompute, or `PB11_SKIP_LIVE_AUDIO=1` to keep export narration but mute speakers during Play.
+**Voice callouts (ChatTTS)** need the `requests` package (pulled in via Poetry). All phase callouts are fixed in code (including **Arm** and each **Fire** step); the first launch precomputes them into `.cache/narration/` (created automatically, gitignored) before the dashboard opens. **Arm** plays the armed callout once; **Fire** plays countdown phases as the shot runs. Reactor facility sounds are procedural NumPy and stay fast. Set `PB11_SKIP_NARRATION=1` for bed-only export, `PB11_SKIP_CACHE_WARM=1` to defer precompute to a background thread, or `PB11_SKIP_LIVE_AUDIO=1` to mute speakers during Play.
 
 ## Contributions and Collaboration
 

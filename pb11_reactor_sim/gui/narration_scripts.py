@@ -25,6 +25,7 @@ from __future__ import annotations
 # reactor display_name -> phase_key -> spoken line
 PHASE_NARRATION: dict[str, dict[str, str]] = {
     "TAE FRC": {
+        "armed": "Armed. Vacuum pumped, gas puffed, coils standby.",
         "gas_fill": "T minus five. Gas fill. Fuel inventory rising.",
         "field_ramp": "T minus three. Coil ramp. Magnetic field rising.",
         "formation": "T minus two. F R C formation. Plasma appearing in the chamber.",
@@ -34,6 +35,7 @@ PHASE_NARRATION: dict[str, dict[str, str]] = {
         "quiescent": "Shot complete. Plasma quiescing.",
     },
     "HB11 Laser": {
+        "armed": "Armed. Chamber pumped, grid at voltage, fresh target loaded.",
         "grid_charge": "Grid at voltage. Stand by for laser chain.",
         "laser_countdown": "T minus three. Two. One. Laser chain armed.",
         "main_pulse": "Fire. Main laser pulse. Block ignition on target.",
@@ -41,6 +43,7 @@ PHASE_NARRATION: dict[str, dict[str, str]] = {
         "quiescent": "Pulse complete. Chamber returning to standby.",
     },
     "LPP DPF": {
+        "armed": "Armed. Gas fill complete, capacitor bank charged.",
         "gas_fill": "Gas fill. Hydrogen and boron inventory in the gap.",
         "trigger": "T minus one. Switch closes. Trigger pulse.",
         "rundown": "Run down. Plasma sheath accelerating toward the axis.",

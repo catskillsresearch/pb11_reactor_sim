@@ -191,17 +191,18 @@ def _normalize_narration_text(note: str) -> str:
         return " ".join(_DIGIT_WORDS[d] for d in token)
 
     txt = re.sub(r"\d+", repl, txt)
+    # Plain punctuation only — bracket tokens like [uv_break] break ChatTTS inference.
+    txt = re.sub(r"\[[^\]]*\]", " ", txt)
     txt = re.sub(r"\s+", " ", txt).strip()
-    txt = re.sub(r"([.!?])\s*", r"\1 [uv_break] ", txt).strip()
-    return re.sub(r"\s+", " ", txt)
+    return txt
 
 
-def _synthesize_chattts(note: str) -> np.ndarray:
+def _synthesize_chattts(note: str, *, already_normalized: bool = False) -> np.ndarray:
     state = _chattts_state()
     chat = state["chat"]
     infer = state["infer"]
-    normalized = _normalize_narration_text(note)
-    wavs = chat.infer([normalized], params_infer_code=infer)
+    spoken = note if already_normalized else _normalize_narration_text(note)
+    wavs = chat.infer([spoken], params_infer_code=infer)
     wav = np.asarray(wavs[0], dtype=np.float32).squeeze()
     if wav.ndim != 1:
         wav = wav.reshape(-1)

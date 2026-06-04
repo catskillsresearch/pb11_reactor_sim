@@ -17,8 +17,8 @@
 """
 Disk cache for ChatTTS narration clips (all reactor phase callouts).
 
-First run synthesizes missing lines; later runs load float32 WAV payloads from
-``.cache/narration/`` under the repository root (override with ``PB11_NARRATION_CACHE``).
+All callout lines are fixed in :mod:`narration_scripts` (19 unique strings).
+They are precomputed once at startup; live playback and export read from disk only.
 """
 from __future__ import annotations
 
@@ -45,30 +45,57 @@ logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[int, int, str], None]
 
 
+def _repo_root() -> Path:
+    here = Path(__file__).resolve()
+    for parent in [here, *here.parents]:
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    return here.parents[2]
+
+
 def cache_dir() -> Path:
     override = os.environ.get("PB11_NARRATION_CACHE", "").strip()
     if override:
-        root = Path(override)
+        root = Path(override).expanduser()
     else:
-        root = Path(__file__).resolve().parents[2] / ".cache" / "narration"
+        root = _repo_root() / ".cache" / "narration"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
-def all_narration_lines() -> list[str]:
-    """Unique sanitized lines across every reactor script."""
+def ensure_cache_dir() -> Path:
+    """Create ``.cache/narration`` under the repository root (idempotent)."""
+    base = _repo_root() / ".cache"
+    base.mkdir(parents=True, exist_ok=True)
+    return cache_dir()
+
+
+def lines_for_reactor(reactor_name: str) -> list[str]:
+    scripts = PHASE_NARRATION.get(reactor_name, {})
     seen: set[str] = set()
     out: list[str] = []
-    for scripts in PHASE_NARRATION.values():
-        for raw in scripts.values():
-            text = _normalize_narration_text(raw)
-            if text and text not in seen:
+    for raw in scripts.values():
+        text = _normalize_narration_text(raw)
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def all_narration_lines() -> list[str]:
+    """Every unique callout string across all three reactors."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in PHASE_NARRATION:
+        for text in lines_for_reactor(name):
+            if text not in seen:
                 seen.add(text)
                 out.append(text)
     return out
 
 
 def cache_path_for_text(text: str) -> Path:
+    ensure_cache_dir()
     key = _cache_key(text)
     return cache_dir() / f"{key}.npz"
 
@@ -95,14 +122,18 @@ def load_cached_speech(text: str) -> np.ndarray | None:
 
 def save_cached_speech(text: str, samples: np.ndarray) -> None:
     path = cache_path_for_text(text)
-    tmp = path.with_suffix(".npz.tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
     arr = np.asarray(samples, dtype=np.float32).reshape(-1)
-    np.savez_compressed(tmp, samples=arr, text=text)
-    tmp.replace(path)
+    staging = path.parent / f".{path.stem}.writing"
+    np.savez_compressed(str(staging), samples=arr, text=text)
+    written = Path(f"{staging}.npz")
+    if not written.is_file():
+        raise OSError(f"narration cache write failed: {written}")
+    os.replace(written, path)
 
 
 def synthesize_and_cache(text: str) -> np.ndarray:
-    """Return speech at :data:`~pb11_reactor_sim.gui.audio_synth.SAMPLE_RATE`, using disk when possible."""
+    """Return speech at export sample rate; synthesize on cache miss."""
     if not text.strip():
         return np.zeros(0, dtype=np.float32)
     hit = load_cached_speech(text)
@@ -110,11 +141,15 @@ def synthesize_and_cache(text: str) -> np.ndarray:
         return hit
     from pb11_reactor_sim.gui.chattts_narration import CHAT_SAMPLE_RATE, _resample
 
-    raw = _synthesize_chattts(text)
+    raw = _synthesize_chattts(text, already_normalized=True)
     speech = _resample(raw, CHAT_SAMPLE_RATE, SAMPLE_RATE)
     if speech.size:
         save_cached_speech(text, speech)
     return speech
+
+
+def cache_ready_for_reactor(reactor_name: str) -> bool:
+    return all(load_cached_speech(text) is not None for text in lines_for_reactor(reactor_name))
 
 
 def ensure_narration_cache(
@@ -126,6 +161,9 @@ def ensure_narration_cache(
     if not narration_enabled():
         return 0, 0
 
+    os.environ.setdefault("TQDM_DISABLE", "1")
+    ensure_cache_dir()
+
     todo = list(lines) if lines is not None else all_narration_lines()
     if not todo:
         return 0, 0
@@ -135,7 +173,8 @@ def ensure_narration_cache(
     total = len(todo)
     for i, text in enumerate(todo):
         if progress is not None:
-            progress(i, total, text[:72])
+            preview = text[:72].replace("[", "(").replace("]", ")")
+            progress(i, total, f"({i + 1}/{total}) {preview}")
         if load_cached_speech(text) is not None:
             cached += 1
             continue

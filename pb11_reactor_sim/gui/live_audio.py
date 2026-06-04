@@ -36,7 +36,7 @@ from pb11_reactor_sim.gui.audio_synth import (
 )
 from pb11_reactor_sim.gui.chattts_narration import POST_PAUSE_S, narration_enabled
 from pb11_reactor_sim.gui.export_timeline import BED_DUCK_FACTOR, BED_LEVEL
-from pb11_reactor_sim.gui.narration_cache import synthesize_and_cache
+from pb11_reactor_sim.gui.narration_cache import load_cached_speech
 from pb11_reactor_sim.gui.narration_scripts import PHASE_NARRATION
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,23 @@ class LiveShotAudio:
     def set_reactor(self, name: str) -> None:
         self._reactor_name = name
         self._reset_voice()
+
+    def play_phase_callout(self, phase: str) -> bool:
+        """Play one cached callout immediately (e.g. ``armed`` on Arm shot)."""
+        if not live_audio_enabled() or not self._ensure_sink():
+            return False
+        scripts = PHASE_NARRATION.get(self._reactor_name, {})
+        raw = scripts.get(phase)
+        if not raw:
+            return False
+        from pb11_reactor_sim.gui.chattts_narration import _normalize_narration_text
+
+        speech = load_cached_speech(_normalize_narration_text(raw))
+        if speech is None or speech.size == 0:
+            logger.info("Callout not cached for phase %s", phase)
+            return False
+        self._push_pcm(speech)
+        return True
 
     def start(self) -> None:
         if not live_audio_enabled():
@@ -125,15 +142,15 @@ class LiveShotAudio:
         raw = scripts.get(phase)
         if not raw:
             return
-        try:
-            from pb11_reactor_sim.gui.chattts_narration import _normalize_narration_text
+        from pb11_reactor_sim.gui.chattts_narration import _normalize_narration_text
 
-            text = _normalize_narration_text(raw)
-            speech = synthesize_and_cache(text)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Live callout skipped for phase %s: %s", phase, exc)
-            return
-        if speech.size == 0:
+        text = _normalize_narration_text(raw)
+        speech = load_cached_speech(text)
+        if speech is None:
+            logger.info(
+                "Live callout not ready for phase %s (run startup voice prep or wait for cache)",
+                phase,
+            )
             return
         self._voice = speech
         self._voice_pos = 0
