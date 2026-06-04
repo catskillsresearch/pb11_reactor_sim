@@ -50,8 +50,6 @@ _PLATEAU_SUBSTEP_MULT = 10
 _TAIL_SUBSTEP_MULT = 4
 #: GUI refresh interval [ms].
 _FRAME_INTERVAL_MS = 33
-#: Live/export audio samples per GUI tick (~33 ms at 48 kHz).
-_SAMPLES_PER_TICK = int(round(48_000 * _FRAME_INTERVAL_MS / 1000))
 
 
 class _NarrationCacheWorker(QtCore.QObject):
@@ -106,7 +104,7 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         self._frame = 0
         self._auto_paused_after_shot = False
         self._recorder = FrameRecorder()
-        self._live_audio = LiveShotAudio(samples_per_tick=_SAMPLES_PER_TICK)
+        self._live_audio = LiveShotAudio(self)
 
         # --- widgets ---
         self.controls = ControlPanel(list(REACTOR_REGISTRY.keys()))

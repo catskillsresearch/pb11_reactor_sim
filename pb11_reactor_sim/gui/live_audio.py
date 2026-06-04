@@ -17,8 +17,8 @@
 """
 Live reactor bed + narration during interactive Play.
 
-Uses cached ChatTTS clips and procedural per-frame bed audio from :mod:`audio_synth`.
-Requires ``PySide6.QtMultimedia`` (included with the simulator extra).
+Audio is driven by a steady clock (``QTimer``), not the physics GUI tick, so
+playback stays continuous even when simulation frames take longer than real time.
 """
 from __future__ import annotations
 
@@ -26,9 +26,9 @@ import logging
 import os
 
 import numpy as np
+from PySide6 import QtCore
 
 from pb11_reactor_sim.gui.audio_synth import (
-    FPS,
     SAMPLE_RATE,
     FrameMeta,
     mix_tracks,
@@ -41,6 +41,9 @@ from pb11_reactor_sim.gui.narration_scripts import PHASE_NARRATION
 
 logger = logging.getLogger(__name__)
 
+# Wall-clock audio pump interval [ms] (independent of sim frame rate).
+_AUDIO_PUMP_MS = 15
+
 
 def live_audio_enabled() -> bool:
     if os.environ.get("PB11_SKIP_LIVE_AUDIO", "").strip().lower() in ("1", "true", "yes"):
@@ -48,21 +51,26 @@ def live_audio_enabled() -> bool:
     return narration_enabled()
 
 
-class LiveShotAudio:
-    """Stream mixed bed + voice to the default output device while the shot runs."""
+class LiveShotAudio(QtCore.QObject):
+    """Stream mixed bed + voice at real-time rate while the shot runs."""
 
-    def __init__(self, *, samples_per_tick: int) -> None:
-        self._n = max(256, samples_per_tick)
+    def __init__(self, parent: QtCore.QObject | None = None) -> None:
+        super().__init__(parent)
+        self._samples_per_pump = max(256, int(round(SAMPLE_RATE * _AUDIO_PUMP_MS / 1000)))
         self._sink = None
         self._io = None
         self._active = False
         self._reactor_name = ""
         self._last_phase = ""
+        self._meta = FrameMeta()
         self._voice: np.ndarray = np.zeros(0, dtype=np.float32)
         self._voice_pos = 0
         self._duck_until = 0
         self._stream_samples = 0
         self._frame_index = 0
+        self._pump = QtCore.QTimer(self)
+        self._pump.setInterval(_AUDIO_PUMP_MS)
+        self._pump.timeout.connect(self._audio_pump)
 
     @property
     def active(self) -> bool:
@@ -96,8 +104,10 @@ class LiveShotAudio:
             return
         self._active = True
         self._reset_voice()
+        self._pump.start()
 
     def stop(self) -> None:
+        self._pump.stop()
         self._active = False
         self._reset_voice()
         if self._sink is not None:
@@ -111,22 +121,30 @@ class LiveShotAudio:
         fast_forward: bool,
         intensity: float,
     ) -> None:
+        """Update live mix inputs from the latest simulation frame (no direct I/O)."""
+        if not self._active:
+            return
+        if phase != self._last_phase:
+            self._on_phase_change(phase)
+            self._last_phase = phase
+        self._meta = FrameMeta(phase=phase, fast_forward=fast_forward, intensity=intensity)
+
+    def _audio_pump(self) -> None:
+        """Generate and play the next slice of bed+voice at real-time rate."""
         if not self._active or self._io is None:
             return
 
         from pb11_reactor_sim.gui.audio_synth import synthesize_frame_chunk
 
-        if phase != self._last_phase:
-            self._on_phase_change(phase)
-            self._last_phase = phase
-
-        meta = FrameMeta(phase=phase, fast_forward=fast_forward, intensity=intensity)
-        bed = synthesize_frame_chunk(meta, frame_index=self._frame_index)
+        n = self._samples_per_pump
+        bed = synthesize_frame_chunk(self._meta, frame_index=self._frame_index)
         self._frame_index += 1
+        if bed.size != n:
+            bed = pad_audio(bed, n)
 
-        voice = self._voice_slice(len(bed))
+        voice = self._voice_slice(n)
         duck = self._stream_samples < self._duck_until
-        mask = np.full(len(bed), 1.0 if duck else 0.0, dtype=np.float32)
+        mask = np.full(n, 1.0 if duck else 0.0, dtype=np.float32)
         mixed = mix_tracks(
             bed,
             voice,
@@ -135,7 +153,7 @@ class LiveShotAudio:
             voice_mask=mask,
         )
         self._push_pcm(mixed)
-        self._stream_samples += len(bed)
+        self._stream_samples += n
 
     def _on_phase_change(self, phase: str) -> None:
         scripts = PHASE_NARRATION.get(self._reactor_name, {})
@@ -167,6 +185,7 @@ class LiveShotAudio:
 
     def _reset_voice(self) -> None:
         self._last_phase = ""
+        self._meta = FrameMeta()
         self._voice = np.zeros(0, dtype=np.float32)
         self._voice_pos = 0
         self._duck_until = 0
@@ -198,7 +217,6 @@ class LiveShotAudio:
     def _push_pcm(self, samples: np.ndarray) -> None:
         if self._io is None:
             return
-        from PySide6 import QtCore
 
         pcm = np.clip(samples, -1.0, 1.0)
         pcm_i16 = (pcm * 32767.0).astype(np.int16)
