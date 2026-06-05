@@ -1,0 +1,278 @@
+<h1>Simulating Proton–Boron Fusion in a TAE Field-Reversed Configuration</h1>
+
+<p><i>What a 2D plasma-core model teaches us about aneutronic fusion, beam sustainment, and direct alpha conversion</i></p>
+
+<p>Most fusion conversations start with deuterium–tritium. I have been exploring something harder and cleaner: <b>proton–boron-11 (p-<sup>11</sup>B)</b> — a reaction that produces <b>no neutrons</b>, only charged <b>helium-4 (alpha) particles</b> that can—in principle—be converted directly to electricity.</p>
+
+<p>To make that tangible, we built <b>pb11_reactor_sim</b>: an open-source GUI that couples a <b>particle-in-cell (PIC) macroparticle view</b> to a <b>0D power-balance model</b> for three public reactor concepts. This article focuses on <b>TAE FRC</b> — a beam-driven <b>field-reversed configuration (FRC)</b> aligned with the direction TAE Technologies has described publicly, especially the <b>Norm</b> milestone (NBI-only FRC sustainment, 2025).</p>
+
+<p>The simulator is <b>not</b> a CAD model of Norm. It is a <b>teaching slice</b> of the plasma core: NBI sustainment, p-<sup>11</sup>B fusion, and <b>inverse cyclotron converter (ICC)</b> recovery — exported as a narrated MP4 you can step through callout by callout.</p>
+
+<p><b>Repository:</b> <a href="https://github.com/catskillsresearch/pb11_reactor_sim" target="_blank">github.com/catskillsresearch/pb11_reactor_sim</a></p>
+
+<h2>Why p-<sup>11</sup>B is a four-stage chain (not one line in a textbook)</h2>
+
+<p>It is tempting to write:</p>
+<p><b><sup>1</sup>H + <sup>11</sup>B → 3α + 8.7 MeV</b></p>
+
+<p>In reality, fusion proceeds through <b>short-lived intermediate nuclei</b>. That internal structure sets the <b>alpha energy spectrum</b> — which matters enormously for <b>direct energy conversion</b>, because a collector grid is an energy filter.</p>
+
+<h3>The four stages</h3>
+<ol>
+  <li><b><sup>1</sup>H + <sup>11</sup>B → <sup>12</sup>C*</b> — excited compound nucleus</li>
+  <li><b><sup>12</sup>C* → α + <sup>8</sup>Be*</b> — primary alpha emission</li>
+  <li><b><sup>8</sup>Be*</b> — unbound recoil nucleus</li>
+  <li><b><sup>8</sup>Be* → α + α</b> — two secondary alphas</li>
+</ol>
+
+<p><b>Net:</b> three alphas sharing ~8.7 MeV, but <b>not</b> with equal energies.</p>
+
+<p>Copy the code below for <b>Mermaid Live</b> to view the flow of these four stages:</p>
+<pre><code>
+flowchart TD
+    A["Stage 1: ¹H + ¹¹B"] --&gt; B["¹²C* (compound nucleus)"]
+    B --&gt; C{"Stage 2: primary α emission"}
+    C --&gt;|"~90% α₁ branch"| D["α₁ + ⁸Be* (2⁺, 3.03 MeV)"]
+    C --&gt;|"~10% α₀ branch"| E["α₀ + ⁸Be (ground)"]
+    D --&gt; F["Stage 4: ⁸Be* → α + α"]
+    E --&gt; G["Stage 4: ⁸Be → α + α"]
+    F --&gt; H["3 alphas total (~8.7 MeV shared)"]
+    G --&gt; H
+    style B fill:#ffd23c,stroke:#333
+    style H fill:#7bffb0,stroke:#333
+</code></pre>
+
+<p>Two branches compete at stage 2:</p>
+<ul>
+  <li><b>The α<sub>1</sub> branch (~90% probability):</b> <sup>12</sup>C* → α<sub>1</sub> + <sup>8</sup>Be*(2<sup>+</sup>, 3.03 MeV) → α<sub>1</sub> + 2α (yields a primary α<sub>1</sub> of ~3.76 MeV and two secondary alphas of ~2.46 MeV)</li>
+  <li><b>The α<sub>0</sub> branch (~10% probability):</b> <sup>12</sup>C* → α<sub>0</sub> + <sup>8</sup>Be(ground) → α<sub>0</sub> + 2α (yields a primary α<sub>0</sub> of ~5.70 MeV and two secondary alphas of ~1.43 MeV)</li>
+</ul>
+
+<p>Copy the code below to see the alpha branch energy distribution in <b>Mermaid Live</b>:</p>
+<pre><code>
+flowchart LR
+    subgraph alpha1 ["α₁ branch ~90%"]
+        A1P["Primary α₁ ~3.76 MeV"]
+        A1S["2× secondary ~2.46 MeV"]
+    end
+    subgraph alpha0 ["α₀ branch ~10%"]
+        A0P["Primary α₀ ~5.70 MeV"]
+        A0S["2× secondary ~1.43 MeV"]
+    end
+    R["p + ¹¹B fusion"] --&gt; alpha1
+    R --&gt; alpha0
+    alpha1 --&gt; ICC["ICC / grid collection\n(energy-filtered)"]
+    alpha0 --&gt; ICC
+</code></pre>
+
+<p>Intermediates live only <b>10<sup>-21</sup>–10<sup>-17</sup> s</b> — far shorter than our 2 ns simulation timestep — so we do <b>not</b> transport <sup>12</sup>C* or <sup>8</sup>Be as particles. The reaction is treated as instantaneous <b>p + <sup>11</sup>B → 3α</b>, while <b>alpha birth energies</b> are sampled from the realistic multi-Gaussian spectrum (~2.9 MeV mean per alpha).</p>
+
+<p><b>Why that matters for TAE:</b> ICC and electrostatic collectors respond to <b>voltage sweeps</b> the way real hardware would — energetic primaries punch through higher retarding potentials; soft secondaries turn back earlier. Monoenergetic alphas would give an unphysical step-function collection curve.</p>
+
+<h2>The real machine (3D) vs. our video (2D)</h2>
+
+<h3>What TAE is building (3D research accelerator context)</h3>
+<p>TAE’s approach is a <b>compact linear FRC</b> — a rotating plasma structure whose internal magnetic field <b>reverses</b> relative to the applied field (often described as a “smoke ring” in cross-section).</p>
+
+<p>Public milestones relevant here:</p>
+<ul>
+  <li><b>Norm (2025):</b> reported <b>neutral beam injection (NBI)–only</b> formation, heating, and sustainment of an FRC <b>without</b> older end <b>collision/formation</b> sections — a simplification TAE describes as a step toward commercial plants.</li>
+  <li><b>Earlier devices (e.g., Norman):</b> more elaborate end formation; still beam-driven FRC physics.</li>
+  <li><b>Roadmap names (Copernicus, Da Vinci):</b> aim at net energy and grid power with thermal wall recovery <b>plus</b> direct alpha conversion. <b>Those full plants are not simulated here.</b></li>
+</ul>
+
+<p>A full commercial design harvests energy two ways:</p>
+<ol>
+  <li><b>Thermal</b> — radiation on walls → steam plant</li>
+  <li><b>Direct</b> — fast alphas on open field lines → <b>ICC</b> at the ends</li>
+</ol>
+
+<p><b>Our module keeps the ICC thread</b> and omits steam turbines, divertors, vacuum plumbing, and powder-dropper hardware.</p>
+
+<h3>Two fuel paths (protons vs. boron)</h3>
+<p>p-<sup>11</sup>B needs <b>both</b> hydrogen and boron-11, but engineering separates injection:</p>
+<ul>
+  <li><b>Protons:</b> In TAE's FRC approach, they are introduced via tangential <b>NBI</b> from the machine's flanks. Protons are accelerated, neutralized, injected, and re-ionized inside the hot core, providing heat, rotation, and current drive. In the simulator, they are represented by <b>red</b> macroparticles entering from <b>−x</b>, where the <b>NBI Current</b> slider sets beam energy and rate.</li>
+  <li><b>Boron-11:</b> In TAE's FRC approach, Boron-11 is introduced directly into the <b>core</b> (as gas or powder), separate from NBI. In the simulator, these are represented by <b>green</b> macroparticles in the midplane, where the <b>gas fill</b> rate raises the core inventory.</li>
+</ul>
+
+<h3>Mapping the 2D video view to the 3D machine</h3>
+<p>The dashboard shows a <b>2D axis-aligned slice</b> through a cylindrical FRC — a <b>meridian cut</b> collapsed for visualization. Copy the code below for <b>Mermaid Live</b> to see the 3D to 2D projection:</p>
+<pre><code>
+flowchart TB
+    subgraph dim3 ["3D TAE FRC research device (conceptual)"]
+        V["Cylindrical vacuum vessel"]
+        NBI3D["Tangential NBI lines (flanks)"]
+        CORE3D["FRC core: field-reversed topology"]
+        BINJ["Boron fueling into core"]
+        ICC3D["ICC segmented collectors at ends"]
+        V --- CORE3D
+        NBI3D --&gt; CORE3D
+        BINJ --&gt; CORE3D
+        CORE3D --&gt; ICC3D
+    end
+    subgraph dim2 ["2D video slice (pb11_reactor_sim)"]
+        XMINUS["x = −x : NBI injector"]
+        MID["y ≈ 0 : field reversal plane"]
+        XPLUS["x = +x : ICC collector"]
+        PIC["Macroparticles in B_z(y)"]
+        XMINUS --&gt; PIC --&gt; XPLUS
+    end
+    dim3 -. "meridian / r–z cut collapsed to x–y" .-&gt; dim2
+</code></pre>
+
+<p>The geometric orientation of the 2D simulator coordinates maps directly to the physical 3D reactor design as follows:</p>
+<ul>
+  <li><b>Horizontal Axis (x):</b> Represents the <b>axial</b> direction along the length of the machine (~1.2 m window).</li>
+  <li><b>Vertical Axis (y):</b> Radial-like coordinate across the <b>field-reversal plane</b> (where <i>B</i><sub><i>z</i></sub> = 0 at the midplane).</li>
+  <li><b>Color map (B_z):</b> Represents the strength of the axial magnetic field; yellow (+B) above, purple (−B) below.</li>
+  <li><b>Left boundary (−x):</b> Region where the <b>NBI</b> enters (labeled <i>Neutral Beam Proton Injector</i>).</li>
+  <li><b>Right boundary (+x):</b> Represents the <b>ICC segmented collector</b> (containing 8 electrodes).</li>
+  <li><b>Top/bottom/left walls:</b> Represents the grounded <b>conducting chamber</b> outer shell.</li>
+  <li><b>Colored dots:</b> Represents <b>macroparticles</b> — where each dot represents a large swarm of real physical particles.</li>
+  <li><b>Cyan overlays:</b> Solid conductors (chamber walls and ICC segments) rather than moving plasma particles.</li>
+</ul>
+
+<p>Copy the code below for <b>Mermaid Live</b> to visualize the particle movement and lifecycle:</p>
+<pre><code>
+flowchart LR
+    subgraph inject ["−x side"]
+        NBI["NBI: fast protons (red)"]
+    end
+    subgraph core ["FRC core (midplane)"]
+        P["p (red)"]
+        B11["¹¹B (green)"]
+        E["e⁻ (blue)"]
+        FUSE["Fusion events"]
+    end
+    subgraph collect ["+x side"]
+        ALPHA["α (yellow)"]
+        ICC["ICC segments"]
+    end
+    NBI --&gt; P
+    P --&gt; FUSE
+    B11 --&gt; FUSE
+    FUSE --&gt; ALPHA
+    ALPHA --&gt; ICC
+</code></pre>
+
+<ul>
+  <li><b>Red + green</b> = fuel; fusion where they overlap hot and dense</li>
+  <li><b>Yellow</b> = fusion product; born in the core, stream <b>+x</b> toward ICC</li>
+  <li><b>Blue</b> = electrons; their temperature <b><i>T</i><sub>e</sub></b> drives Bremsstrahlung losses</li>
+</ul>
+
+<p>The <b>right-hand panel</b> is not spatial — it is a <b>time history</b> of the 0D power balance (temperatures, power terms, gain).</p>
+
+<h2>Control inputs and the optimum this model finds</h2>
+
+<p>Three sliders define the TAE FRC operating point:</p>
+<ul>
+  <li><b>NBI Current (0–120 A, Default: 40 A):</b> Beam current (normalized). Sets beam energy, fast-ion fraction, input power <b><i>P</i><sub>NBI</sub></b>, and PIC injection rate.</li>
+  <li><b>Background B0 (0.1–5.0 T, Default: 1.5 T):</b> Peak |<i>B</i><sub><i>z</i></sub>| at flat-top. Enters confinement time <b>τ<sub>E</sub></b>, bulk <b><i>T</i><sub>i</sub></b>, and core density.</li>
+  <li><b>ICC Coupling (0.50–0.95, Default: 0.85):</b> <b>η<sub>ICC</sub></b>: fraction of fusion power booked as electricity at the collector.</li>
+</ul>
+
+<h3>Beam sustainment (the physics the optimizer discovers)</h3>
+<p>TAE’s Norm result is <b>NBI-only sustainment</b>: the reversed field is <b>created and held by beam-driven current</b>, not coils alone. The model uses a sustainment fraction <b><i>S</i>(<i>I</i><sub>NBI</sub>, <i>B</i><sub>0</sub>)</b>:</p>
+<ul>
+  <li>Below <b>~30 A</b>, <b><i>S</i> → 0</b> — the FRC does not maintain reversal regardless of <i>B</i><sub>0</sub>.</li>
+  <li><b><i>B</i><sub>0</sub> cannot substitute for beams.</b></li>
+  <li>Low NBI is legal but <b>self-penalizing</b> (τ<sub>E</sub> collapses, transport losses rise).</li>
+</ul>
+
+<p>There is <b>no hard floor</b> on beam current — the optimizer finds <b>~55 A</b> because physics demands it, not because of a constraint.</p>
+
+<p>Copy the code below for <b>Mermaid Live</b> to see the power balance routing:</p>
+<pre><code>
+flowchart TD
+    NBI["P_NBI\n(beam input)"] --&gt; SUST["Sustainment S(I_NBI, B₀)"]
+    SUST --&gt; FUS["P_fusion\n(beam-target + thermal tail)"]
+    FUS --&gt; ICC["P_ICC = η_ICC × P_fusion"]
+    FUS --&gt; LOSS["Losses"]
+    LOSS --&gt; BREMS["P_Brems"]
+    LOSS --&gt; TRAN["P_transport"]
+    NBI --&gt; DEN["Denominator"]
+    BREMS --&gt; DEN
+    TRAN --&gt; DEN
+    ICC --&gt; QSYS["Q_sys = P_ICC / (P_NBI + losses)"]
+    DEN --&gt; QSYS
+    FUS --&gt; QPL["Q_plasma = P_fusion / losses"]
+    LOSS --&gt; QPL
+</code></pre>
+
+<h3>Optimum from Optimize (current 0D model)</h3>
+<p>Pressing <b>Optimize</b> searches the 3D control space (coarse grid + local refinement, ~1 s, background thread). On the current codebase, the optimal operating values settle as follows:</p>
+<ul>
+  <li><b>NBI Current:</b> ~55 A</li>
+  <li><b>Background B0:</b> 5.0 T (slider maximum)</li>
+  <li><b>ICC Coupling:</b> 0.95 (slider maximum)</li>
+  <li><b>Q_sys (system gain):</b> ~0.066</li>
+</ul>
+
+<p><b><i>Q</i><sub>sys</sub></b> = <i>P</i><sub>ICC</sub> / (<i>P</i><sub>NBI</sub> + <i>P</i><sub>Brems</sub> + <i>P</i><sub>transport</sub>) — what must exceed 1 for net electricity.</p>
+
+<p>The model is built to explore <b>proposed</b> p-<sup>11</sup>B operating physics on top of Norm-style beam sustainment. The optimizer’s best point in this 0D parameterization still sits <b>below breakeven</b> — which is itself the lesson: even with beams, ICC, and aneutronic fuel, <b>Rider-class difficulty</b> does not disappear magically. Norm demonstrated <b>FRC sustainment</b>, not wall-plug <i>Q</i> ≥ 1 on p-<sup>11</sup>B.</p>
+
+<h2>Output measurement graphs (right-hand diagnostic panel)</h2>
+<p>All three plots share a <b>time axis in microseconds (µs)</b> and update every physics step during the discharge.</p>
+
+<ul>
+  <li><b>1. Ion / Electron Temperature (top):</b> Monitors ion temperature <b><i>T</i><sub>i</sub></b> (red line) and electron temperature <b><i>T</i><sub>e</sub></b> (blue line) in keV. To bypass the Rider Limit, the goal is to keep ions hot (150–300 keV) while electrons remain relatively cold.</li>
+  <li><b>2. Core Power Balance (middle, log scale):</b> Measures fusion heating <b><i>P</i><sub>fusion</sub></b> (yellow line) calculated via <i>n</i><sub><i>p</i></sub><i>n</i><sub><i>B</i></sub>⟨<i>σv</i>⟩<i>E</i><sub><i>f</i></sub> where <i>E</i><sub><i>f</i></sub> = 8.7 MeV; relativistic Bremsstrahlung <b><i>P</i><sub>Brems</sub></b> (pink line) proportional to <i>Z</i><sub>eff</sub><sup>2</sup><i>n</i><sub>e</sub><sup>2</sup>√<i>T</i><sub>e</sub>; and conduction/transport loss <b><i>P</i><sub>cond</sub></b> (green line) proportional to <i>n</i><sub>e</sub><i>T</i><sub>e</sub> / τ<sub>E</sub>.</li>
+  <li><b>3. Net Gain Q (bottom, log scale):</b> Measures plant gain <b><i>Q</i><sub>sys</sub></b> (solid white line) representing recovered ICC power against beam and transport losses; and physics gain <b><i>Q</i><sub>plasma</sub></b> (dashed yellow line) showing <i>P</i><sub>fusion</sub> / (<i>P</i><sub>Brems</sub> + <i>P</i><sub>cond</sub>) which excludes the beam injection power. A dashed grey line marks the <i>Q</i> = 1 breakeven point.</li>
+</ul>
+
+<h2>Reactor phases in the exported video (8 numbered callouts)</h2>
+<p>The MP4 walks through a scripted shot. Countdown labels are control-room shorthand — simulation time is compressed so you reach flat-top in seconds of real time, not minutes.</p>
+
+<p>Copy the code below for <b>Mermaid Live</b> to map out the sequence of reactor phases:</p>
+<pre><code>
+flowchart LR
+    A1["1 Armed"] --&gt; A2["2 Gas fill"]
+    A2 --&gt; A3["3 Coil ramp"]
+    A3 --&gt; A4["4 FRC formation"]
+    A4 --&gt; A5["5 NBI on"]
+    A5 --&gt; A6["6 Flat-top"]
+    A6 --&gt; A7["7 Ramp-down"]
+    A7 --&gt; A8["8 Quiescent"]
+    style A6 fill:#ff6464,stroke:#333,color:#fff
+</code></pre>
+
+<p>The sequence of operations during a simulation run proceeds as follows:</p>
+<ul>
+  <li><b>Step 1/8 - Armed:</b> Coils on standby, vacuum pumped, gas puffed (weak <i>B</i><sub><i>z</i></sub>).</li>
+  <li><b>Step 2/8 - Gas fill:</b> Boron and hydrogen inventory rises (green population builds) over approximately 0.8 µs.</li>
+  <li><b>Step 3/8 - Coil ramp:</b> The <i>B</i><sub><i>z</i></sub> colormap strengthens as the scaling factor reaches 1 over approximately 2.0 µs.</li>
+  <li><b>Step 4/8 - FRC formation:</b> Hot plasma macroparticles are seeded and the FRC topology appears over approximately 3.0 µs.</li>
+  <li><b>Step 5/8 - NBI on:</b> Fast red protons stream from the −x side and beam heating begins over approximately 4.0 µs.</li>
+  <li><b>Step 6/8 - Flat-top:</b> Full discharge lasting approximately 25 µs. Includes fusion, yellow alphas streaming to the ICC, and active diagnostics.</li>
+  <li><b>Step 7/8 - Ramp-down:</b> Beams and magnetic field fall over approximately 4 µs.</li>
+  <li><b>Step 8/8 - Quiescent:</b> Plasma quiesces; shot complete.</li>
+</ul>
+
+<p><b>Workflow to generate the MP4:</b> Select <b>Optimize</b> → <b>Compile</b> → <b>Rec Save</b> (or use <b>Play</b>/<b>Step</b> for preview). Compile pre-renders frames and voice; the exporter burns numbered subtitles directly into the file.</p>
+
+<h2>What I take away</h2>
+<ol>
+  <li><b>p-<sup>11</sup>B is an engineering spectrum problem</b>, not just a triple-alpha stoichiometry problem — collection hardware cares about energy distribution.</li>
+  <li><b>TAE’s bet is structural:</b> beam-sustained FRC + separate boron fueling + ICC — our 2D slice makes that story visible.</li>
+  <li><b>Simulation ≠ milestone:</b> Norm proved NBI sustainment; this GUI layers a <b>proposed</b> p-<sup>11</sup>B performance model on top — the optimizer still finds <i>Q</i><sub>sys</sub> ≪ 1 in the current 0D parameterization.</li>
+  <li><b>Open tools accelerate intuition</b> — colored macroparticles, synchronized narration, and diagnostic time histories beat equations alone for building mental models.</li>
+</ol>
+
+<p>Clone the repo, run <b>Optimize</b>, <b>Compile</b>, and export your own shot. Forks are welcome under Apache 2.0.</p>
+
+<h2>References</h2>
+<ol>
+  <li><b>TAE Technologies</b> — company program and public milestones: <a href="https://tae.com" target="_blank">tae.com</a></li>
+  <li><b>TAE Norm / NBI-only FRC sustainment (2025):</b> <i>Nature Communications</i>, doi:10.1038/s41467-025-58849-5</li>
+  <li><b>Rider, T. H.</b> — fundamental limits on fusion reactor systems (Rider limit): <i>Physics of Plasmas</i> (1995)</li>
+  <li><b>Nevins, W. M. &amp; Swain, M.</b> — p-<sup>11</sup>B reactivity and engineering constraints</li>
+  <li><b>pb11_reactor_sim source, tutorial, and physics notes:</b> <a href="https://github.com/catskillsresearch/pb11_reactor_sim" target="_blank">github.com/catskillsresearch/pb11_reactor_sim</a></li>
+  <li><b>Catskills Research Company</b> — simulation disclaimer: models for theoretical research; not engineering specifications for physical deployment</li>
+</ol>
+
+<p><i>Disclaimer: pb11_reactor_sim was developed with AI assistance from public documentation. Models are for education and theoretical research — not operational specifications. See the repository LICENSE and NOTICE for full terms.</i></p>
+
+<p><i>Mermaid diagrams: copy and paste individual code blocks into the <a href="https://mermaid.live" target="_blank">Mermaid Live Editor</a> to render them.</i></p>
