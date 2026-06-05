@@ -35,7 +35,7 @@ _OPTIMIZE: dict[str, OptimizeResult] = {}
 _COMPILE: dict[str, CompiledPlayback] = {}
 
 # Bump when compile capture / playback layout changes (invalidates disk pickles).
-COMPILE_CACHE_VERSION = 3
+COMPILE_CACHE_VERSION = 8
 
 # Legacy location (pre-unified cache); still read if present.
 _LEGACY_CACHE_ROOT = Path.home() / ".cache" / "pb11_reactor_sim"

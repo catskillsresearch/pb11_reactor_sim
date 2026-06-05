@@ -37,7 +37,7 @@ CHAT_VOICE_SEED = 1983
 # ChatTTS prompt speed 0–5 (lower = slower, clearer). Override: PB11_CHAT_SPEED=0
 CHAT_SPEED_LEVEL = max(0, min(5, int(os.environ.get("PB11_CHAT_SPEED", "0"))))
 #: Mandatory pause after each phase callout [s] (8 segments → +12 s minimum).
-POST_PAUSE_S = 1.5
+POST_PAUSE_S = 0.5
 
 _CHAT_STATE: dict[str, object] = {}
 
@@ -184,17 +184,8 @@ def _int_to_words(n: int) -> str:
     return " ".join(_DIGIT_WORDS[d] for d in str(n))
 
 
-# Spoken replacements (TTS misreads technical terms).
-_SPEAK_ALIASES: dict[str, str] = {
-    "quiescing": "kwee essing",
-    "quiescent": "kwee essent",
-}
-
-
 def _normalize_narration_text(note: str) -> str:
     txt = sanitize_narration_line(note)
-    for src, spoken in _SPEAK_ALIASES.items():
-        txt = re.sub(rf"\b{re.escape(src)}\b", spoken, txt, flags=re.IGNORECASE)
 
     def repl(m: re.Match[str]) -> str:
         token = m.group(0)

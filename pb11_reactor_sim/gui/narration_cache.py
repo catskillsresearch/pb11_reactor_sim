@@ -42,18 +42,18 @@ from pb11_reactor_sim.gui.narration_scripts import PHASE_NARRATION
 
 logger = logging.getLogger(__name__)
 
-# Trailing silence baked into cached clips so Qt audio output does not clip the tail.
+# Trailing silence baked into every cached callout clip (tail not clipped in playback/export).
 PLAYBACK_TRAILER_S = 1.0
 
 ProgressCallback = Callable[[int, int, str], None]
 
 
 def with_playback_trailer(samples: np.ndarray, *, trailer_s: float = PLAYBACK_TRAILER_S) -> np.ndarray:
-    """Append trailing silence so callouts are not cut off during playback."""
+    """Append ``trailer_s`` seconds of silence after every spoken line."""
     arr = np.asarray(samples, dtype=np.float32).reshape(-1)
-    n = int(round(trailer_s * SAMPLE_RATE))
-    if n <= 0 or arr.size == 0:
+    if arr.size == 0:
         return arr
+    n = max(1, int(round(trailer_s * SAMPLE_RATE)))
     return np.concatenate([arr, np.zeros(n, dtype=np.float32)])
 
 
@@ -114,7 +114,7 @@ def cache_path_for_text(text: str) -> Path:
 
 def _cache_key(text: str) -> str:
     payload = (
-        f"v4|seed={CHAT_VOICE_SEED}|speed={CHAT_SPEED_LEVEL}|sr={SAMPLE_RATE}"
+        f"v7|seed={CHAT_VOICE_SEED}|speed={CHAT_SPEED_LEVEL}|sr={SAMPLE_RATE}"
         f"|trailer={PLAYBACK_TRAILER_S}|{text}"
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]

@@ -65,8 +65,79 @@ class CompiledPlayback:
 
 
 # Snapshots per phase before stretch; more clips → visible macroparticle motion.
-_CAPTURE_GRABS_PER_PHASE = 20
-_MAX_SNAPS_PER_PHASE = 28
+_CAPTURE_GRABS_PER_PHASE = 32
+_MAX_SNAPS_PER_PHASE = 48
+_EXTRA_SUBSTEPS_DURING_FIRE = 3
+
+
+@dataclass
+class ShotAxisPeaks:
+    t_us: float = 1.0
+    ti_kev: float = 0.25
+    te_kev: float = 0.15
+    p_w_m3: float = 1.0e-20
+    q_max: float = 1.0
+
+    def bump(self, reactor: ReactorSimulation) -> None:
+        d = reactor.diagnostics
+        if not d.time:
+            return
+        # ``d.time`` is already stored in µs (see :meth:`ReactorSimulation.compute_processes`).
+        self.t_us = max(self.t_us, float(d.time[-1]))
+        if d.T_i:
+            self.ti_kev = max(self.ti_kev, float(max(d.T_i)))
+        if d.T_e:
+            self.te_kev = max(self.te_kev, float(max(d.T_e)))
+        eps = 1.0e-30
+        for seq in (d.p_fusion, d.p_brems, d.p_cond):
+            if seq:
+                self.p_w_m3 = max(self.p_w_m3, float(max(seq)))
+        for seq in (d.q_net, d.q_plasma):
+            if seq:
+                self.q_max = max(self.q_max, float(max(seq)))
+
+
+def _advance_shot_loop(
+    reactor: ReactorSimulation,
+    *,
+    peaks: ShotAxisPeaks | None,
+    step_budget: int = 12_000,
+) -> None:
+    for _ in range(step_budget):
+        n_sub = substeps_per_frame(reactor) + (
+            _EXTRA_SUBSTEPS_DURING_FIRE if reactor.shot_phase == ShotPhase.FIRING else 0
+        )
+        for _ in range(n_sub):
+            reactor.step()
+        if peaks is not None:
+            peaks.bump(reactor)
+        if reactor.shot_phase == ShotPhase.QUIESCENT:
+            break
+
+
+def _rewind_for_capture(reactor: ReactorSimulation, *, from_quiescent: bool) -> None:
+    reactor.apply_controls(reactor.controls)
+    if from_quiescent:
+        reactor.enter_quiescent()
+    else:
+        reactor.arm_shot()
+
+
+def _measure_shot_peaks(
+    reactor: ReactorSimulation,
+    *,
+    from_quiescent: bool,
+    tick_ui: TickUi,
+) -> ShotAxisPeaks:
+    """Fast dry-run to learn axis limits before PNG capture."""
+    peaks = ShotAxisPeaks()
+    _rewind_for_capture(reactor, from_quiescent=from_quiescent)
+    tick_ui()
+    if not from_quiescent:
+        if not reactor.fire_shot():
+            return peaks
+    _advance_shot_loop(reactor, peaks=peaks)
+    return peaks
 
 
 def _phase_index_bounds(meta: list[FrameMeta], phase: str) -> tuple[int, int]:
@@ -155,27 +226,30 @@ def _capture_phase_clips(
             ),
         )
 
-    reactor.apply_controls(reactor.controls)
-    reactor.arm_shot()
+    _rewind_for_capture(reactor, from_quiescent=from_quiescent)
     refresh_canvas()
     refresh_diag()
     tick_ui()
 
     if not from_quiescent:
-        for _ in range(6):
+        for _ in range(10):
             grab("armed")
             tick_ui()
 
-    if not reactor.fire_shot():
+    if not from_quiescent and not reactor.fire_shot():
         raise RuntimeError("fire_shot failed after arm")
+    if from_quiescent and not reactor.fire_shot():
+        raise RuntimeError("fire_shot failed from quiescent")
 
     prev_key = reactor._fire_phase_key
     ticks_in_phase = 0
     step_budget = 12_000
 
     for _ in range(step_budget):
-        substeps = substeps_per_frame(reactor)
-        for _ in range(substeps):
+        n_sub = substeps_per_frame(reactor) + (
+            _EXTRA_SUBSTEPS_DURING_FIRE if reactor.shot_phase == ShotPhase.FIRING else 0
+        )
+        for _ in range(n_sub):
             reactor.step()
 
         if reactor.shot_phase == ShotPhase.FIRING:
@@ -191,10 +265,7 @@ def _capture_phase_clips(
             prev_key = key
 
         ticks_in_phase += 1
-        if reactor.shot_phase == ShotPhase.FIRING:
-            interval = 1
-        else:
-            interval = max(1, _CAPTURE_GRABS_PER_PHASE // 6)
+        interval = 1 if reactor.shot_phase == ShotPhase.FIRING else 2
         if ticks_in_phase == 1 or ticks_in_phase % interval == 0:
             grab(key)
 
@@ -226,11 +297,19 @@ def compile_shot_playback(
     tick_ui: TickUi,
     refresh_canvas: Callable[[], None],
     refresh_diag: Callable[[], None],
+    on_axis_peaks: Callable[[ShotAxisPeaks], None] | None = None,
     progress: ProgressCallback | None = None,
 ) -> CompiledPlayback:
     """Build MP4-quality stretched playback from phase snapshots + cached voice."""
     if progress is not None:
-        progress(0, 4, "snapshots")
+        progress(0, 5, "axis peaks")
+
+    peaks = _measure_shot_peaks(reactor, from_quiescent=from_quiescent, tick_ui=tick_ui)
+    if on_axis_peaks is not None:
+        on_axis_peaks(peaks)
+
+    if progress is not None:
+        progress(1, 5, "snapshots")
 
     canvas_raw, diag_raw, meta_raw = _capture_phase_clips(
         reactor,
@@ -243,26 +322,27 @@ def compile_shot_playback(
     )
 
     if progress is not None:
-        progress(1, 4, "voice timeline")
+        progress(2, 5, "voice timeline")
 
     timeline = build_playback_timeline(
         canvas_raw,
         diag_raw,
         meta_raw,
         reactor_name=reactor_name,
+        with_subtitles=False,
     )
     if not timeline.diag_frames:
         raise RuntimeError("playback timeline missing diagnostics frames")
 
     if progress is not None:
-        progress(2, 4, "facility audio")
+        progress(3, 5, "facility audio")
 
     bed = synthesize_shot_audio(timeline.meta, fps=FPS)
     n = max(bed.size, timeline.narration.size)
     bed = pad_audio(bed, n)
 
     if progress is not None:
-        progress(3, 4, "mixing")
+        progress(4, 5, "mixing")
 
     mixed = mix_tracks(
         bed,
@@ -285,7 +365,7 @@ def compile_shot_playback(
         fire_start_s = arm_end_s
 
     if progress is not None:
-        progress(4, 4, "done")
+        progress(5, 5, "done")
 
     return CompiledPlayback(
         canvas_frames=timeline.frames,

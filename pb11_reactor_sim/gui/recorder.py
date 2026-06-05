@@ -37,6 +37,7 @@ import numpy as np
 from pb11_reactor_sim.gui.audio_synth import FPS, SAMPLE_RATE, FrameMeta, pad_audio, write_wav
 from pb11_reactor_sim.gui.chattts_narration import narration_enabled
 from pb11_reactor_sim.gui.export_timeline import BED_DUCK_FACTOR, BED_LEVEL, ExportTimeline, build_export_timeline
+from pb11_reactor_sim.gui.session_cache import cache_root
 
 FPS = 30.0
 
@@ -50,11 +51,34 @@ class FrameRecorder:
         self._reactor_name: str = ""
         self._frame_size: tuple[int, int] | None = None
         self._compiled_mixed: np.ndarray | None = None
+        self._export_canvas: list[bytes] | None = None
+        self._export_diag: list[bytes] | None = None
+        self._export_meta: list[FrameMeta] | None = None
+        self._panel_size: tuple[int, int, int] | None = None  # left_w, right_w, h
         self.active = False
 
     def set_compiled_audio(self, mixed: np.ndarray) -> None:
         """Use pre-mixed compile audio for MP4 mux (matches Play/Step review)."""
         self._compiled_mixed = np.asarray(mixed, dtype=np.float32).reshape(-1)
+
+    def export_panel_size(self) -> tuple[int, int, int] | None:
+        """Fixed (left_w, right_w, h) for stable composed frames, if compile export is set."""
+        return self._panel_size
+
+    def set_compiled_export(
+        self,
+        *,
+        canvas_frames: list[bytes],
+        diag_frames: list[bytes],
+        meta: list[FrameMeta],
+        reactor_name: str,
+    ) -> None:
+        """Prefer compile PNGs for MP4 (compose once, subtitle once)."""
+        self._export_canvas = list(canvas_frames)
+        self._export_diag = list(diag_frames)
+        self._export_meta = list(meta)
+        self._reactor_name = reactor_name
+        self._panel_size = _panel_size_for_export(canvas_frames, diag_frames)
 
     def start(self, *, reactor_name: str = "") -> None:
         self._frames.clear()
@@ -99,17 +123,22 @@ class FrameRecorder:
     ) -> tuple[str | None, str | None]:
         """Prompt for save path and write the movie.
 
+        Uses compile export when set; otherwise captured GUI frames.
+
         Returns ``(saved_path, error_message)``.
         """
         self.active = False
-        if not self._frames:
+        has_compile = bool(self._export_canvas and self._export_meta)
+        if not self._frames and not has_compile:
             return None, None
         if not default_name.lower().endswith(".mp4"):
             default_name = f"{default_name}.mp4"
+        out_dir = cache_root()
+        out_dir.mkdir(parents=True, exist_ok=True)
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             parent,
             "Save simulation recording",
-            str(Path.home() / default_name),
+            str(out_dir / default_name),
             "MP4 video (*.mp4);;PNG sequence (*.png)",
         )
         if not path:
@@ -161,8 +190,12 @@ class FrameRecorder:
             else "Building export timeline…",
         )
         timeline = self._build_export_timeline(parent)
-        frames = timeline.frames if timeline else self._frames
-        meta = timeline.meta if timeline else self._meta
+        if timeline is not None:
+            frames = timeline.frames
+            meta = timeline.meta
+        else:
+            frames = self._frames
+            meta = self._meta
 
         step(1, f"Encoding video ({len(frames)} frames)…")
         ffmpeg = shutil.which("ffmpeg")
@@ -191,11 +224,25 @@ class FrameRecorder:
 
     def _build_export_timeline(self, parent: QtWidgets.QWidget | None):
         try:
+            if self._export_canvas and self._export_diag and self._export_meta:
+                composed = compose_export_frames(
+                    self._export_canvas,
+                    self._export_diag,
+                    panel_size=self._panel_size,
+                )
+                return build_export_timeline(
+                    composed,
+                    self._export_meta,
+                    reactor_name=self._reactor_name,
+                    fps=FPS,
+                    with_subtitles=True,
+                )
             return build_export_timeline(
                 self._frames,
                 self._meta,
                 reactor_name=self._reactor_name,
                 fps=FPS,
+                with_subtitles=True,
             )
         except Exception as exc:  # noqa: BLE001
             if parent is not None:
@@ -321,11 +368,54 @@ class FrameRecorder:
         return str(stem.parent / f"{stem.name}_00000.png")
 
 
+def _png_dimensions(png: bytes) -> tuple[int, int]:
+    try:
+        from PIL import Image
+
+        with Image.open(BytesIO(png)) as img:
+            return img.size
+    except Exception:
+        return (0, 0)
+
+
+def _panel_size_for_export(
+    canvas_frames: list[bytes],
+    diag_frames: list[bytes],
+) -> tuple[int, int, int]:
+    """Fixed (left_w, right_w, h) so every composed frame has identical layout."""
+    lw = rh = h = 0
+    for png in canvas_frames:
+        w, ph = _png_dimensions(png)
+        lw = max(lw, w)
+        h = max(h, ph)
+    for png in diag_frames:
+        w, ph = _png_dimensions(png)
+        rh = max(rh, w)
+        h = max(h, ph)
+    return (max(1, lw), max(1, rh), max(1, h))
+
+
+def _fit_panel(png: bytes, box_w: int, box_h: int):
+    from PIL import Image
+
+    img = Image.open(BytesIO(png)).convert("RGB")
+    scale = min(box_w / img.width, box_h / img.height)
+    nw = max(1, int(round(img.width * scale)))
+    nh = max(1, int(round(img.height * scale)))
+    if (nw, nh) != img.size:
+        img = img.resize((nw, nh), Image.Resampling.LANCZOS)
+    panel = Image.new("RGB", (box_w, box_h), (0, 0, 0))
+    panel.paste(img, ((box_w - nw) // 2, (box_h - nh) // 2))
+    return panel
+
+
 def compose_png_horizontal(
     left: bytes | None,
     right: bytes | None,
+    *,
+    panel_size: tuple[int, int, int] | None = None,
 ) -> bytes | None:
-    """Stitch two PNG snapshots side by side (canvas left, diagnostics right)."""
+    """Stitch canvas (left) and diagnostics (right); optional fixed panel geometry."""
     if not left and not right:
         return None
     if not left:
@@ -335,19 +425,43 @@ def compose_png_horizontal(
     try:
         from PIL import Image
 
-        a = Image.open(BytesIO(left)).convert("RGB")
-        b = Image.open(BytesIO(right)).convert("RGB")
-        h = a.height
-        bw = max(1, int(round(b.width * h / b.height)))
-        b = b.resize((bw, h), Image.Resampling.LANCZOS)
-        out = Image.new("RGB", (a.width + bw, h))
-        out.paste(a, (0, 0))
-        out.paste(b, (a.width, 0))
+        if panel_size is not None:
+            lw, rw, h = panel_size
+            a = _fit_panel(left, lw, h)
+            b = _fit_panel(right, rw, h)
+            out = Image.new("RGB", (lw + rw, h), (0, 0, 0))
+            out.paste(a, (0, 0))
+            out.paste(b, (lw, 0))
+        else:
+            a = Image.open(BytesIO(left)).convert("RGB")
+            b = Image.open(BytesIO(right)).convert("RGB")
+            h = a.height
+            bw = max(1, int(round(b.width * h / b.height)))
+            b = b.resize((bw, h), Image.Resampling.LANCZOS)
+            out = Image.new("RGB", (a.width + bw, h))
+            out.paste(a, (0, 0))
+            out.paste(b, (a.width, 0))
         buf = BytesIO()
         out.save(buf, format="PNG")
         return buf.getvalue()
     except ImportError:
         return left
+
+
+def compose_export_frames(
+    canvas_frames: list[bytes],
+    diag_frames: list[bytes],
+    *,
+    panel_size: tuple[int, int, int] | None = None,
+) -> list[bytes]:
+    """Compose every canvas/diag pair with identical panel dimensions."""
+    size = panel_size or _panel_size_for_export(canvas_frames, diag_frames)
+    out: list[bytes] = []
+    for left, right in zip(canvas_frames, diag_frames):
+        png = compose_png_horizontal(left, right, panel_size=size)
+        if png:
+            out.append(png)
+    return out
 
 
 def _normalize_png_for_video(
