@@ -60,8 +60,21 @@ class ReactorCanvas(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self._glw = pg.GraphicsLayoutWidget()
-        layout.addWidget(self._glw)
+        layout.addWidget(self._glw, stretch=1)
 
+        self._subtitle_bar = QtWidgets.QLabel()
+        self._subtitle_bar.setWordWrap(True)
+        self._subtitle_bar.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._subtitle_bar.setStyleSheet(
+            "background-color: rgba(0, 0, 0, 0.72); color: #ffffff; "
+            "padding: 8px 12px; font-weight: bold;"
+        )
+        self._subtitle_bar.hide()
+        layout.addWidget(self._subtitle_bar)
+
+        from pb11_reactor_sim.gui.playback_cache import PlaybackFrameCache
+
+        self._playback_cache = PlaybackFrameCache()
         self._playback_label = QtWidgets.QLabel(self._glw)
         self._playback_label.setScaledContents(False)
         self._playback_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -365,8 +378,29 @@ class ReactorCanvas(QtWidgets.QWidget):
         self._hud_text.fill = pg.mkBrush(255, 255, 255, 210)
         self._hud_text.border = pg.mkPen(0, 0, 0, width=2)
 
-    def show_playback_png(self, png: bytes | None) -> None:
+    def cache_playback_frames(self, frames: list[bytes]) -> None:
+        self._playback_cache.load(frames)
+
+    def set_playback_subtitle(self, text: str | None) -> None:
+        if text and text.strip():
+            self._subtitle_bar.setText(text.strip())
+            self._subtitle_bar.show()
+        else:
+            self._subtitle_bar.hide()
+
+    def show_playback_png(self, png: bytes | None = None, *, ix: int | None = None) -> None:
         """Display a pre-rendered PNG over the live plot (compile playback)."""
+        from pb11_reactor_sim.gui.playback_cache import show_cached_png
+
+        if ix is not None and len(self._playback_cache):
+            self._playback_ix = ix
+            show_cached_png(
+                self._playback_label,
+                self._playback_cache,
+                ix,
+                target=self._glw.size(),
+            )
+            return
         if not png:
             self.end_playback()
             return
@@ -376,7 +410,7 @@ class ReactorCanvas(QtWidgets.QWidget):
         scaled = pix.scaled(
             self._glw.size(),
             QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-            QtCore.Qt.TransformationMode.SmoothTransformation,
+            QtCore.Qt.TransformationMode.FastTransformation,
         )
         self._playback_label.setPixmap(scaled)
         self._playback_label.resize(self._glw.size())
@@ -387,12 +421,23 @@ class ReactorCanvas(QtWidgets.QWidget):
         return self._playback_label.isVisible()
 
     def end_playback(self) -> None:
+        self._playback_cache.clear()
         self._playback_label.hide()
+        self._subtitle_bar.hide()
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
-        if self._playback_label.isVisible():
-            self._playback_label.resize(self._glw.size())
+        if self._playback_label.isVisible() and len(self._playback_cache):
+            from pb11_reactor_sim.gui.playback_cache import show_cached_png
+
+            # Re-scale cached frame on resize (ix from last show — use label tag).
+            ix = getattr(self, "_playback_ix", 0)
+            show_cached_png(
+                self._playback_label,
+                self._playback_cache,
+                ix,
+                target=self._glw.size(),
+            )
 
     def grab_frame_png(self) -> bytes | None:
         """Return a PNG snapshot of the plot widget (for MP4 export)."""

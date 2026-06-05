@@ -35,10 +35,10 @@ WORKFLOW_STEPS: tuple[WorkflowStep, ...] = (
     WorkflowStep("optimize", "Optimize control sliders for best Q_net", "Optimize"),
     WorkflowStep(
         "compile",
-        "Pre-render shot video + voice (required before record/review)",
+        "Pre-render shot frames + voice for MP4 export",
         "Compile",
     ),
-    WorkflowStep("rec_start", "Start MP4 frame capture", "Rec Start"),
+    WorkflowStep("rec_start", "Optional: capture live GUI frames", "Rec Start"),
     WorkflowStep(
         "review",
         "Play or Step through numbered callouts (after compile)",
@@ -46,7 +46,7 @@ WORKFLOW_STEPS: tuple[WorkflowStep, ...] = (
     ),
     WorkflowStep(
         "rec_save",
-        "Save MP4 (numbered narration subtitles on export)",
+        "Export MP4 from compile (voice + numbered subtitles)",
         "Rec Save",
     ),
 )
@@ -66,8 +66,8 @@ def can_run_step(step_id: str, completed: set[str]) -> tuple[bool, str]:
     if step_id in completed and step_id not in REPEATABLE_STEPS:
         return False, "This step is already complete."
     if step_id == "rec_save":
-        if "rec_start" not in completed:
-            return False, "Complete “Rec Start” first."
+        if "compile" not in completed:
+            return False, "Compile first — pre-rendered frames + voice are required."
         return True, ""
     idx = step_index(step_id)
     if idx > 0:

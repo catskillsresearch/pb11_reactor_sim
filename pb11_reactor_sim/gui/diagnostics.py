@@ -85,6 +85,40 @@ class DiagnosticsPanel(QtWidgets.QWidget):
         layout.addWidget(self.q_plot)
 
         self.setMinimumWidth(360)
+        self._axis_locked = False
+
+    def set_limits_from_peaks(
+        self,
+        *,
+        t_us: float,
+        ti_kev: float,
+        te_kev: float,
+        p_w_m3: float,
+        q_max: float,
+    ) -> None:
+        """Lock plot axes so compile/playback frames do not rescale between grabs."""
+        t_hi = max(5.0, t_us * 1.12)
+        t_y = max(0.3, ti_kev, te_kev) * 1.15
+        p_lo = max(1.0e-30, p_w_m3 * 1.0e-6)
+        p_hi = max(1.0e-20, p_w_m3 * 12.0)
+        q_lo = max(1.0e-30, 1.0e-3)
+        q_hi = max(1.0, q_max * 12.0)
+
+        for plot in (self.temp_plot, self.power_plot, self.q_plot):
+            plot.enableAutoRange(enable=False)
+
+        self.temp_plot.setXRange(0.0, t_hi, padding=0.02)
+        self.temp_plot.setYRange(0.0, t_y, padding=0.02)
+        self.power_plot.setXRange(0.0, t_hi, padding=0.02)
+        self.power_plot.setYRange(p_lo, p_hi, padding=0.02)
+        self.q_plot.setXRange(0.0, t_hi, padding=0.02)
+        self.q_plot.setYRange(q_lo, q_hi, padding=0.02)
+        self._axis_locked = True
+
+    def unlock_axis_limits(self) -> None:
+        self._axis_locked = False
+        for plot in (self.temp_plot, self.power_plot, self.q_plot):
+            plot.enableAutoRange(enable=True)
 
     def clear(self) -> None:
         """Remove all curves (e.g. after Reset)."""
@@ -117,11 +151,29 @@ class DiagnosticsPanel(QtWidgets.QWidget):
         self.curve_q.setData(t, np.maximum(np.asarray(diag.q_net), eps))
         self.curve_q_plasma.setData(t, np.maximum(np.asarray(diag.q_plasma), eps))
 
-    def show_playback_png(self, png: bytes | None) -> None:
-        if not hasattr(self, "_playback_label"):
-            self._playback_label = QtWidgets.QLabel(self)
-            self._playback_label.setScaledContents(False)
-            self._playback_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+    def __init_playback_overlay(self) -> None:
+        if hasattr(self, "_playback_label"):
+            return
+        from pb11_reactor_sim.gui.playback_cache import PlaybackFrameCache
+
+        self._playback_cache = PlaybackFrameCache()
+        self._playback_label = QtWidgets.QLabel(self)
+        self._playback_label.setScaledContents(False)
+        self._playback_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignBottom
+        )
+
+    def cache_playback_frames(self, frames: list[bytes]) -> None:
+        self.__init_playback_overlay()
+        self._playback_cache.load(frames)
+
+    def show_playback_png(self, png: bytes | None = None, *, ix: int | None = None) -> None:
+        from pb11_reactor_sim.gui.playback_cache import show_cached_png
+
+        self.__init_playback_overlay()
+        if ix is not None and len(self._playback_cache):
+            show_cached_png(self._playback_label, self._playback_cache, ix, target=self.size())
+            return
         if not png:
             self.end_playback()
             return
@@ -131,7 +183,7 @@ class DiagnosticsPanel(QtWidgets.QWidget):
         scaled = pix.scaled(
             self.size(),
             QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-            QtCore.Qt.TransformationMode.SmoothTransformation,
+            QtCore.Qt.TransformationMode.FastTransformation,
         )
         self._playback_label.setPixmap(scaled)
         self._playback_label.resize(self.size())
@@ -139,6 +191,8 @@ class DiagnosticsPanel(QtWidgets.QWidget):
         self._playback_label.show()
 
     def end_playback(self) -> None:
+        if hasattr(self, "_playback_cache"):
+            self._playback_cache.clear()
         if hasattr(self, "_playback_label"):
             self._playback_label.hide()
 

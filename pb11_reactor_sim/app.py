@@ -124,6 +124,7 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         self._review_auto = False
         self._review_segment_done = False
         self._segment_voice_done = False
+        self._full_timeline_playback = False
         self._playback_ix = 0
         self._playback_stop_ix = 0
         self._playback_mode: str | None = None  # "review"
@@ -257,11 +258,18 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         self._review_seg_ix = -1
         self._review_segment_done = True
         self._shot_player.load(compiled.mixed_audio)
+        self.canvas.cache_playback_frames(compiled.canvas_frames)
+        self.diagnostics.cache_playback_frames(compiled.diag_frames)
+        self._recorder.set_compiled_export(
+            canvas_frames=compiled.canvas_frames,
+            diag_frames=compiled.diag_frames,
+            meta=list(compiled.meta),
+            reactor_name=self._recorder_reactor_name(),
+        )
         self.controls.set_review_enabled(True)
-        if self._recorder.active:
-            self._attach_recorder_compiled_audio(compiled.mixed_audio)
+        self._attach_recorder_compiled_audio(compiled.mixed_audio)
         self.controls.mark_step_done("compile")
-        self.controls.unmark_steps("review")
+        self.controls.unmark_steps("review", "rec_save")
         n_seg = len(self._review_segments)
         n = len(compiled.meta)
         from pb11_reactor_sim.gui.session_cache import compile_cache_dir
@@ -270,7 +278,7 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             f"{prefix}: {n} frames ({compiled.duration_s:.1f} s), "
             f"{n_seg} numbered steps. Cache: {compile_cache_dir()}. "
-            "Use Play or Step to review."
+            "Rec Save exports MP4; Play/Step are optional preview."
         )
 
     def _try_restore_compile_cache(self) -> bool:
@@ -335,10 +343,12 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         self._review_auto = False
         self._review_segment_done = False
         self._playback_mode = None
+        self._full_timeline_playback = False
         self._playback_ix = 0
         self._playback_stop_ix = 0
         self.canvas.end_playback()
         self.diagnostics.end_playback()
+        self.diagnostics.unlock_axis_limits()
         self._shot_player.cleanup()
         self.controls.set_review_enabled(False)
         self.controls.unmark_steps("compile", "review")
@@ -404,7 +414,7 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
             "Compiling full shot (physics + voice + facility audio)…",
             None,
             0,
-            4,
+            5,
             self,
         )
         dlg.setWindowTitle("p-11B Reactor Simulator")
@@ -423,6 +433,15 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
                 self._recorder_reactor_name(),
                 self.controls.current_values(),
                 from_quiescent=from_quiescent,
+            )
+
+        def _apply_axis_peaks(peaks) -> None:
+            self.diagnostics.set_limits_from_peaks(
+                t_us=peaks.t_us,
+                ti_kev=peaks.ti_kev,
+                te_kev=peaks.te_kev,
+                p_w_m3=peaks.p_w_m3,
+                q_max=peaks.q_max,
             )
 
         def _refresh_compile_view() -> None:
@@ -450,6 +469,7 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
                 tick_ui=QtWidgets.QApplication.processEvents,
                 refresh_canvas=_refresh_compile_view,
                 refresh_diag=_refresh_compile_view,
+                on_axis_peaks=_apply_axis_peaks,
                 progress=progress,
             )
             if fp:
@@ -499,10 +519,23 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
     def _on_play(self) -> None:
         if self._reactor is None or not self._require_compiled():
             return
+        pb = self._compiled_playback
+        if pb is None:
+            return
         self._stop_review_playback()
         self._frame = 0
         self._review_auto = True
-        self._play_review_segment(0, auto_continue=True)
+        self._full_timeline_playback = True
+        self._playback_mode = "review"
+        self._review_seg_ix = 0
+        self._review_segment_done = False
+        self._playback_ix = 0
+        self._playback_stop_ix = len(pb.meta)
+        seg = self._segment_for_frame(0)
+        self._show_playback_frame(0, seg=seg)
+        if shot_audio_enabled():
+            self._shot_player.play(start_ms=0)
+        self._set_run_timer(True)
 
     def _on_step(self) -> None:
         if self._reactor is None or not self._require_compiled():
@@ -570,9 +603,18 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
                 return p.callout
         return phase
 
+    def _segment_for_frame(self, ix: int):
+        for seg in self._review_segments:
+            if seg.start_ix <= ix < seg.end_ix:
+                return seg
+        if self._review_segments:
+            return self._review_segments[-1]
+        return None
+
     def _play_review_segment(self, seg_ix: int, *, auto_continue: bool) -> None:
         if self._reactor is None or seg_ix < 0 or seg_ix >= len(self._review_segments):
             return
+        self._full_timeline_playback = False
         self._review_seg_ix = seg_ix
         self._review_auto = auto_continue
         self._review_segment_done = False
@@ -583,7 +625,7 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         self._playback_stop_ix = seg.end_ix
         self._show_playback_frame(self._playback_ix, seg=seg)
         if shot_audio_enabled():
-            self._shot_player.play(start_ms=seg.start_ms, end_ms=seg.speech_end_ms)
+            self._shot_player.play(start_ms=seg.start_ms)
         self._set_run_timer(True)
 
     def _show_review_segment(self, seg_ix: int, *, paused: bool) -> None:
@@ -600,8 +642,8 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         pb = self._compiled_playback
         if pb is None or self._reactor is None or ix < 0 or ix >= len(pb.meta):
             return
-        self.canvas.show_playback_png(pb.canvas_frames[ix])
-        self.diagnostics.show_playback_png(pb.diag_frames[ix])
+        self.canvas.show_playback_png(ix=ix)
+        self.diagnostics.show_playback_png(ix=ix)
         if self._playback_mode == "review" and seg is not None:
             phase = seg.phase
         else:
@@ -622,14 +664,6 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         else:
             self._reactor.shot_phase = ShotPhase.FIRING
         self._sync_shot_ui()
-        self.canvas.update_hud(
-            gui_frame=ix,
-            substeps=_SUBSTEPS_PER_FRAME,
-            speed_mode="playback",
-            sim_time_us=0.0,
-            ops=self._reactor.shot_phase.value,
-            idle=False,
-        )
         msg = (
             seg.subtitle
             if seg is not None
@@ -646,49 +680,35 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
             if 0 <= self._review_seg_ix < len(self._review_segments)
             else None
         )
-        if (
-            seg is not None
-            and shot_audio_enabled()
-            and not self._segment_voice_done
-            and seg.speech_end_ms > seg.start_ms
-            and self._shot_player.position_ms() >= seg.speech_end_ms
-        ):
-            self._shot_player.pause()
-            self._segment_voice_done = True
-
-        if (
-            seg is not None
-            and shot_audio_enabled()
-            and not self._segment_voice_done
-            and seg.end_ms > seg.start_ms
-        ):
-            span_ix = max(1, self._playback_stop_ix - seg.start_ix)
-            pos_ms = max(0, self._shot_player.position_ms() - seg.start_ms)
-            span_ms = max(1, seg.end_ms - seg.start_ms)
-            self._playback_ix = seg.start_ix + min(
-                span_ix - 1,
-                int(pos_ms * span_ix / span_ms),
-            )
-        else:
-            self._playback_ix += 1
+        self._playback_ix += 1
 
         if self._playback_ix >= self._playback_stop_ix:
             self._playback_ix = max(0, self._playback_stop_ix - 1)
-            self._end_playback_segment()
+            if self._full_timeline_playback:
+                self._finish_full_timeline_playback()
+            else:
+                self._end_playback_segment()
             return
+
+        if self._full_timeline_playback:
+            seg = self._segment_for_frame(self._playback_ix)
+            if seg is not None:
+                self._review_seg_ix = seg.seq - 1
         self._show_playback_frame(self._playback_ix, seg=seg)
+
+    def _finish_full_timeline_playback(self) -> None:
+        self._playback_mode = None
+        self._full_timeline_playback = False
+        self._set_run_timer(False)
+        if shot_audio_enabled():
+            self._shot_player.stop()
+        if self._reactor is not None:
+            self.controls.mark_step_done("review")
+            self._finish_review_session()
 
     def _end_playback_segment(self) -> None:
         finished_ix = self._review_seg_ix
         auto = self._review_auto
-
-        if (
-            auto
-            and self._reactor is not None
-            and finished_ix + 1 < len(self._review_segments)
-        ):
-            self._play_review_segment(finished_ix + 1, auto_continue=True)
-            return
 
         self._playback_mode = None
         self._set_run_timer(False)
@@ -875,22 +895,35 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
         )
 
     def _on_record_save(self) -> None:
-        if not self._recorder.active:
-            self.statusBar().showMessage("Rec Start first — no capture in progress.")
+        ok, reason = self.controls.can_run_step("rec_save")
+        if not ok:
+            self.statusBar().showMessage(reason)
             return
-        if self._recorder.has_frames() and shot_audio_enabled() and self._compiled_playback is None:
+        if self._compiled_playback is not None:
+            compiled = self._compiled_playback
+            self._recorder.set_compiled_export(
+                canvas_frames=compiled.canvas_frames,
+                diag_frames=compiled.diag_frames,
+                meta=list(compiled.meta),
+                reactor_name=self._recorder_reactor_name(),
+            )
+            self._attach_recorder_compiled_audio(compiled.mixed_audio)
+        elif self._recorder.has_frames() and shot_audio_enabled():
             self._compile_recorded_audio_for_mp4()
+        else:
+            self.statusBar().showMessage("Compile first — nothing to export.")
+            return
         saved = self._recorder.stop(self, default_name=self._recording_default_name())
         self.controls.set_recording_active(False)
         if saved[0]:
             self.controls.mark_step_done("rec_save")
         if saved[0] and not saved[1]:
-            self.statusBar().showMessage(f"Recording saved (audio + narration): {saved[0]}")
+            self.statusBar().showMessage(f"MP4 saved (voice + subtitles): {saved[0]}")
         elif saved[0] and saved[1]:
             QtWidgets.QMessageBox.warning(self, "MP4 encode", saved[1])
             self.statusBar().showMessage(f"Saved fallback: {saved[0]}")
         else:
-            self.statusBar().showMessage("Recording cancelled (no frames captured).")
+            self.statusBar().showMessage("Export cancelled.")
 
     # -- main loop ----------------------------------------------------------
     def _on_tick(self) -> None:
@@ -901,7 +934,11 @@ class PlasmaSimApp(QtWidgets.QMainWindow):
             if self._recorder.active and self._compiled_playback is not None:
                 ix = max(0, min(self._playback_ix, len(self._compiled_playback.meta) - 1))
                 pb = self._compiled_playback
-                png = compose_png_horizontal(pb.canvas_frames[ix], pb.diag_frames[ix])
+                png = compose_png_horizontal(
+                    pb.canvas_frames[ix],
+                    pb.diag_frames[ix],
+                    panel_size=self._recorder.export_panel_size(),
+                )
                 self._recorder.add_frame(
                     png,
                     phase=pb.meta[ix].phase,

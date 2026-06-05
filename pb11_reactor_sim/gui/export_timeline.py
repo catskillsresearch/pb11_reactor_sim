@@ -69,22 +69,17 @@ def speech_for_phase_line(
 ) -> tuple[np.ndarray, float, str]:
     """Cached speech for timeline assembly.
 
-    Returns ``(full_audio, core_duration_s, display_text)``. Core duration
-    excludes the playback trailer so segment windows match callouts.
+    Returns ``(full_audio, audible_duration_s, display_text)`` including the
+    playback trailer so line endings (e.g. ``standby``) are not clipped.
     """
     if not narration_enabled() or not raw_line.strip():
         return np.zeros(0, dtype=np.float32), 0.0, ""
-    from pb11_reactor_sim.gui.narration_cache import (
-        PLAYBACK_TRAILER_S,
-        synthesize_and_cache,
-    )
+    from pb11_reactor_sim.gui.narration_cache import synthesize_and_cache
 
     text = _normalize_narration_text(raw_line)
     full = synthesize_and_cache(text)
-    trailer_n = int(round(PLAYBACK_TRAILER_S * sample_rate))
-    core = full[:-trailer_n] if full.size > trailer_n else full
-    core_dur = core.size / sample_rate if core.size else 0.0
-    return full, core_dur, text
+    audible_dur = full.size / sample_rate if full.size else 0.0
+    return full, audible_dur, text
 
 
 def _phase_stretch_plan(
@@ -217,27 +212,58 @@ def build_playback_timeline(
     )
 
 
+# Max consecutive repeats of one snapshot when stretching (≈100 ms at 30 fps).
+_STRETCH_MAX_HOLD = 3
+
+
 def _stretch_frames(frames: list[bytes], n_out: int) -> list[bytes]:
-    if n_out <= len(frames):
+    """Ping-pong through source frames so long callouts show motion, not one frozen still."""
+    n = len(frames)
+    if n_out <= n:
         return frames[:n_out]
-    if len(frames) == 1:
+    if n == 1:
         return frames * n_out
     out: list[bytes] = []
-    for i in range(n_out):
-        idx = (i * (len(frames) - 1)) // max(n_out - 1, 1)
+    idx = 0
+    direction = 1
+    hold = _STRETCH_MAX_HOLD
+    while len(out) < n_out:
         out.append(frames[idx])
+        hold -= 1
+        if hold <= 0:
+            hold = _STRETCH_MAX_HOLD
+            idx += direction
+            if idx >= n - 1:
+                idx = n - 1
+                direction = -1
+            elif idx <= 0:
+                idx = 0
+                direction = 1
     return out
 
 
 def _stretch_meta(meta: list[FrameMeta], n_out: int) -> list[FrameMeta]:
-    if n_out <= len(meta):
+    n = len(meta)
+    if n_out <= n:
         return meta[:n_out]
-    if len(meta) == 1:
+    if n == 1:
         return meta * n_out
     out: list[FrameMeta] = []
-    for i in range(n_out):
-        idx = (i * (len(meta) - 1)) // max(n_out - 1, 1)
+    idx = 0
+    direction = 1
+    hold = _STRETCH_MAX_HOLD
+    while len(out) < n_out:
         out.append(meta[idx])
+        hold -= 1
+        if hold <= 0:
+            hold = _STRETCH_MAX_HOLD
+            idx += direction
+            if idx >= n - 1:
+                idx = n - 1
+                direction = -1
+            elif idx <= 0:
+                idx = 0
+                direction = 1
     return out
 
 
@@ -251,13 +277,9 @@ def _assemble_narration(
     mask = np.zeros(n, dtype=np.float32)
     for seg in segments:
         offset = int(round(seg.start_s * sample_rate))
-        core_n = min(
-            int(round(seg.speech_dur_s * sample_rate)),
-            int(seg.speech.size),
-        )
-        if core_n > 0:
-            end = min(n, offset + core_n)
-            track[offset:end] += seg.speech[: core_n]
+        speech_n = min(int(seg.speech.size), max(0, n - offset))
+        if speech_n > 0:
+            track[offset : offset + speech_n] += seg.speech[:speech_n]
         # Duck reactor bed for the full segment window (speech + post-pause).
         win_end = min(n, int(round(seg.end_s * sample_rate)))
         if win_end > offset:

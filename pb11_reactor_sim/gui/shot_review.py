@@ -41,7 +41,7 @@ class ReviewSegment:
     start_ix: int
     end_ix: int  # exclusive
     start_ms: int
-    speech_end_ms: int  # exclusive — core voice only (no trailer / next callout)
+    speech_end_ms: int  # exclusive — audible voice incl. trailer padding
     end_ms: int  # exclusive, matches stretched frame span
 
 
@@ -77,8 +77,6 @@ def build_review_segments(
                     extra,
                 )
 
-    n_meta = len(playback.meta)
-
     for seq, (phase, start_ix, end_ix) in enumerate(runs, start=1):
         raw = scripts.get(phase, "")
         if raw:
@@ -97,15 +95,6 @@ def build_review_segments(
             end_ms = int(round(audio.end_s * 1000.0))
             min_speech_ms = max(250, int(round(1000.0 / FPS)))
             speech_end_ms = max(start_ms + min_speech_ms, speech_end_ms)
-            # Frame span must match the narration timeline (not raw capture clip count).
-            start_ix = max(0, min(int(round(audio.start_s * FPS)), n_meta - 1))
-            end_ix_ex = max(
-                start_ix + 1,
-                min(int(round(audio.end_s * FPS)), n_meta),
-            )
-            min_frames = max(12, int(round(audio.speech_dur_s * FPS)) + 1)
-            end_ix_ex = max(start_ix + min_frames, end_ix_ex)
-            end_ix_ex = min(end_ix_ex, n_meta)
         else:
             speech_end_ms = end_ms
         out.append(
