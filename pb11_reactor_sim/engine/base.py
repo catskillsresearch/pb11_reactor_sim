@@ -142,19 +142,27 @@ class BoundaryShape:
 # ---------------------------------------------------------------------------
 # Diagnostics
 # ---------------------------------------------------------------------------
+# TAE full shot is ~20k physics steps (2 ns dt, ~40 µs); keep entire trace for plots/MP4.
+DIAG_HISTORY_MAXLEN = 32_768
+
+
+def _new_diag_buffer() -> deque[float]:
+    return deque(maxlen=DIAG_HISTORY_MAXLEN)
+
+
 @dataclass
 class Diagnostics:
-    """Rolling time-history buffers feeding the 1D diagnostic plots."""
+    """Time-history buffers feeding the 1D diagnostic plots (one sample per physics step)."""
 
-    maxlen: int = 2000
-    time: deque[float] = field(default_factory=lambda: deque(maxlen=2000))
-    T_i: deque[float] = field(default_factory=lambda: deque(maxlen=2000))
-    T_e: deque[float] = field(default_factory=lambda: deque(maxlen=2000))
-    p_fusion: deque[float] = field(default_factory=lambda: deque(maxlen=2000))
-    p_brems: deque[float] = field(default_factory=lambda: deque(maxlen=2000))
-    p_cond: deque[float] = field(default_factory=lambda: deque(maxlen=2000))
-    q_net: deque[float] = field(default_factory=lambda: deque(maxlen=2000))
-    q_plasma: deque[float] = field(default_factory=lambda: deque(maxlen=2000))
+    maxlen: int = DIAG_HISTORY_MAXLEN
+    time: deque[float] = field(default_factory=_new_diag_buffer)
+    T_i: deque[float] = field(default_factory=_new_diag_buffer)
+    T_e: deque[float] = field(default_factory=_new_diag_buffer)
+    p_fusion: deque[float] = field(default_factory=_new_diag_buffer)
+    p_brems: deque[float] = field(default_factory=_new_diag_buffer)
+    p_cond: deque[float] = field(default_factory=_new_diag_buffer)
+    q_net: deque[float] = field(default_factory=_new_diag_buffer)
+    q_plasma: deque[float] = field(default_factory=_new_diag_buffer)
 
     def append(
         self,
